@@ -1,0 +1,3229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="robots" content="noindex">
+<title>Dispatch</title>
+<style>
+:root {
+    --ink: #10141b;
+    --panel: rgba(16, 20, 27, 0.94);
+    --line: rgba(255, 255, 255, 0.09);
+    --text: #eef1f5;
+    --muted: #8d95a3;
+    --foot: #35c7ff;
+    --vehicle: #ffb020;
+    --ok: #37d67a;
+    --bad: #ff5a4f;
+    --font: Bahnschrift, "DIN Alternate", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--ink);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 15px;
+}
+
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+
+/* ---- map ---- */
+#view {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    touch-action: none;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#view.dragging { cursor: grabbing; }
+
+#stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+}
+/* markers live in their own layer that is moved but never scaled, so names stay sharp */
+#markers {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+}
+#markers.snap .marker { transition: none; }
+#map-img { display: block; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+#map-missing {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    background: repeating-linear-gradient(45deg, #151a22 0 24px, #181e27 24px 48px);
+    font-size: 28px;
+    text-align: center;
+    padding: 40px;
+}
+
+/* a marker is placed at its on-screen position for the current zoom */
+.marker {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    transition: transform var(--glide, 2000ms) linear;
+}
+.marker.fresh { transition: none; }
+.pin {
+    position: absolute;
+    left: 0;
+    top: 0;
+}
+.dot {
+    position: absolute;
+    left: -8px;
+    top: -8px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--foot);
+    border: 2.5px solid #fff;
+    box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .65), 0 2px 6px rgba(0, 0, 0, .5);
+    cursor: pointer;
+}
+.marker.vehicle .dot { background: var(--vehicle); border-radius: 4px; }
+/* small pointer showing where the player is facing */
+.nose {
+    position: absolute;
+    left: -5px;
+    top: -19px;
+    width: 0;
+    height: 0;
+    border: 5px solid transparent;
+    border-bottom: 8px solid #fff;
+    border-top: 0;
+    filter: drop-shadow(0 0 1px rgba(0, 0, 0, .9));
+    transform-origin: 5px 19px;
+    pointer-events: none;
+}
+.name {
+    position: absolute;
+    left: 14px;
+    top: -11px;
+    padding: 2px 7px 1px;
+    border-radius: 3px;
+    background: rgba(10, 13, 18, .82);
+    white-space: nowrap;
+    font-size: 13px;
+    pointer-events: none;
+}
+body.no-names .marker:not(.selected) .name { display: none; }
+.marker.selected { z-index: 2; }
+.marker.selected .dot { box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .65), 0 0 0 6px rgba(255, 255, 255, .35); }
+.marker.selected .name { background: #fff; color: #10141b; font-weight: 600; }
+
+/* ---- panel ---- */
+#panel {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    bottom: 16px;
+    width: 290px;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .45);
+}
+#panel header { padding: 18px 20px 14px; }
+#panel h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+    font-stretch: 85%;
+}
+#count { margin: 4px 0 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+#search {
+    margin: 0 14px 10px;
+    padding: 9px 12px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, .05);
+}
+#search::placeholder { color: var(--muted); }
+
+#list {
+    flex: 1;
+    margin: 0;
+    padding: 6px;
+    list-style: none;
+    overflow-y: auto;
+    border-top: 1px solid var(--line);
+}
+#list button {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    width: 100%;
+    padding: 9px 12px 8px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    text-align: left;
+}
+#list button:hover { background: rgba(255, 255, 255, .07); }
+#list button.selected { background: rgba(255, 255, 255, .12); }
+#list .glyph {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--foot);
+    flex: none;
+}
+#list .vehicle .glyph { background: var(--vehicle); border-radius: 2px; }
+#list .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .id, #list .ping { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+#list .id { min-width: 22px; text-align: right; }
+#list .ping:empty { display: none; }
+#empty { padding: 14px; color: var(--muted); line-height: 1.4; }
+
+#legend {
+    display: flex;
+    gap: 16px;
+    padding: 11px 20px 12px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 13px;
+}
+#legend span { display: flex; align-items: center; gap: 7px; }
+#legend i { width: 9px; height: 9px; border-radius: 50%; background: var(--foot); }
+#legend .veh i { background: var(--vehicle); border-radius: 2px; }
+
+/* ---- dispatch calls ---- */
+#calls { flex: none; max-height: 38%; overflow-y: auto; padding: 10px 6px 6px; border-top: 1px solid var(--line); }
+#calls h2 { margin: 0 14px 6px; color: var(--bad); font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+#calls ul { margin: 0; padding: 0; list-style: none; }
+#calls li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+#calls-note { margin: 0 14px 6px; color: var(--vehicle); font-size: 13px; line-height: 1.35; }
+#calls-note:empty { display: none; }
+#calls .units { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 6px; }
+#calls .units:empty { display: none; }
+#calls .units button { padding: 3px 8px 2px; border: 0; border-radius: 3px; background: rgba(255, 255, 255, .1); font-size: 12.5px; }
+#calls .units button:hover { background: var(--bad); }
+#calls .send { margin-right: 0; color: var(--text); }
+#calls .acts { flex-basis: 100%; display: flex; gap: 14px; padding: 0 12px 8px; }
+#calls .acts button { padding: 0; border: 0; background: none; color: var(--muted); font-size: 12.5px; text-decoration: underline; }
+#calls .acts button:hover { color: var(--text); }
+.route { position: absolute; left: 0; top: 0; height: 0; border-top: 2px dashed var(--bad); transform-origin: 0 0; opacity: .85; pointer-events: none; }
+#list .st { color: var(--ok); font-size: 12px; white-space: nowrap; }
+#list .st.busy { color: var(--vehicle); }
+#list .st:empty { display: none; }
+#calls .open { flex: 1; min-width: 0; padding: 8px 12px 7px; border: 0; border-radius: 4px; background: transparent; text-align: left; }
+#calls .open:hover { background: rgba(255, 255, 255, .07); }
+#calls .what { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#calls .sub { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+#calls .done { flex: none; margin-right: 6px; padding: 6px 9px 5px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font-size: 13px; }
+#calls .done:hover { color: var(--text); background: rgba(255, 255, 255, .08); }
+
+.call { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 3; }
+.call-pin {
+    position: absolute;
+    left: -12px;
+    top: -12px;
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--bad);
+    color: #fff;
+    border: 2.5px solid #fff;
+    box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .65);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.call-pin::after {
+    content: "";
+    position: absolute;
+    inset: -6px;
+    border: 2px solid var(--bad);
+    border-radius: 50%;
+    animation: call-ring 1.6s ease-out infinite;
+    pointer-events: none;
+}
+@keyframes call-ring { from { transform: scale(.7); opacity: .9; } to { transform: scale(1.9); opacity: 0; } }
+.call .name { left: 18px; background: var(--bad); color: #fff; font-weight: 600; }
+body.no-names .call .name { display: block; }
+@media (prefers-reduced-motion: reduce) { .call-pin::after { animation: none; } }
+
+/* ---- dispatcher duty ---- */
+#duty-box { padding: 0 14px 12px; }
+#account { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 2px 9px; color: var(--muted); font-size: 13px; }
+#account b { color: var(--text); font-weight: 600; }
+#account button { padding: 0; border: 0; background: none; color: var(--muted); font-size: 13px; text-decoration: underline; }
+#account button:hover { color: var(--text); }
+/* things only an admin account may do; the server refuses them anyway */
+body.not-admin #template-form, body.not-admin #templates-list button,
+body.not-admin #call-template-update, body.not-admin #call-template-remove, body.not-admin #call-save-row { display: none !important; }
+#duty { display: flex; gap: 6px; }
+#duty input { flex: 1; min-width: 0; padding: 8px 10px 7px; border: 1px solid var(--line); border-radius: 4px; background: rgba(255, 255, 255, .05); }
+#duty input:disabled { color: var(--muted); }
+#duty button { padding: 8px 12px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--ok); border-color: transparent; color: #0c1a12; font-weight: 600; white-space: nowrap; }
+#duty-box.on #duty button { background: transparent; border-color: var(--line); color: var(--text); font-weight: 400; }
+#duty-info { margin: 7px 2px 0; color: var(--muted); font-size: 13px; line-height: 1.35; }
+#duty-box.on #duty-info { color: var(--ok); }
+#mode-row { display: block; margin: 10px 2px 0; color: var(--muted); font-size: 13px; }
+#mode-row select { display: block; width: 100%; margin-top: 5px; padding: 7px 8px 6px; border: 1px solid var(--line); border-radius: 4px; background: #1a2029; color: var(--text); font: inherit; }
+
+/* ---- history ---- */
+#history {
+    position: fixed;
+    z-index: 12;
+    top: 16px;
+    right: 16px;
+    bottom: 16px;
+    width: 420px;
+    max-width: calc(100vw - 32px);
+    display: flex;
+    flex-direction: column;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .55);
+}
+#history header { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 12px; }
+#history h2 { margin: 0; font-size: 20px; font-weight: 600; }
+#history header button { padding: 7px 12px 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#history-filter { margin: 0 14px 10px; padding: 9px 12px 8px; border: 1px solid var(--line); border-radius: 4px; background: rgba(255, 255, 255, .05); }
+#history-list { flex: 1; margin: 0; padding: 4px 18px 14px; list-style: none; overflow-y: auto; border-top: 1px solid var(--line); }
+#history-list li { display: flex; gap: 12px; padding: 8px 0 7px; border-bottom: 1px solid var(--line); font-size: 14px; line-height: 1.4; }
+#history-list time { flex: none; width: 92px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#history-list .none { color: var(--muted); border: 0; }
+
+/* ---- templates window ---- */
+#templates, #accounts {
+    position: fixed;
+    z-index: 12;
+    top: 16px;
+    right: 16px;
+    bottom: 16px;
+    width: 420px;
+    max-width: calc(100vw - 32px);
+    display: flex;
+    flex-direction: column;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .55);
+}
+#templates header, #accounts header { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 12px; }
+#templates h2, #accounts h2 { margin: 0; font-size: 20px; font-weight: 600; }
+#templates header button, #accounts header button { padding: 7px 12px 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#templates-list { flex: 1; margin: 0; padding: 4px 12px; list-style: none; overflow-y: auto; border-top: 1px solid var(--line); }
+#templates-list li { display: flex; align-items: center; gap: 10px; padding: 9px 6px 8px; border-bottom: 1px solid var(--line); }
+#templates-list li.editing { background: rgba(255, 255, 255, .06); }
+#templates-list .prio { flex: none; width: 30px; padding: 2px 0 1px; border-radius: 3px; background: var(--bad); color: #fff; font-size: 12px; font-weight: 600; text-align: center; }
+#templates-list .prio.p2 { background: var(--vehicle); color: #10141b; }
+#templates-list .prio.p3 { background: #5d6878; }
+#templates-list .main { flex: 1; min-width: 0; }
+#templates-list .title { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#templates-list .sub { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#templates-list button { flex: none; padding: 5px 9px 4px; border: 1px solid var(--line); border-radius: 4px; background: transparent; font-size: 13px; }
+#templates-list button.danger { color: var(--bad); }
+#templates-list .fixed { flex: none; color: var(--muted); font-size: 12.5px; }
+#templates-list .none { color: var(--muted); border: 0; }
+#template-form { padding: 14px 18px 16px; border-top: 1px solid var(--line); }
+#template-form h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+#template-form input, #template-form select { display: block; width: 100%; margin: 0 0 8px; padding: 9px 11px 8px; border: 1px solid var(--line); border-radius: 4px; background: #1a2029; color: inherit; font: inherit; }
+#template-form .pair { display: flex; gap: 8px; }
+#template-form .pair > * { flex: 1; min-width: 0; }
+#template-form .buttons { display: flex; gap: 8px; margin-top: 2px; }
+#template-form .buttons button { flex: 1; padding: 9px 10px 8px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#template-form .buttons button.primary { background: var(--text); border-color: transparent; color: var(--ink); font-weight: 600; }
+
+/* ---- accounts window ---- */
+#accounts-list { flex: 1; margin: 0; padding: 4px 12px; list-style: none; overflow-y: auto; border-top: 1px solid var(--line); }
+#accounts-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 10px 6px 9px; border-bottom: 1px solid var(--line); }
+#accounts-list .who { flex: 1; min-width: 120px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#accounts-list .tag { padding: 1px 6px 0; border-radius: 3px; background: rgba(255, 255, 255, .13); font-size: 12px; font-weight: 600; }
+#accounts-list .you { color: var(--muted); font-size: 12.5px; font-weight: 400; }
+#accounts-list button { padding: 5px 9px 4px; border: 1px solid var(--line); border-radius: 4px; background: transparent; font-size: 13px; }
+#accounts-list button.danger { color: var(--bad); }
+#accounts-list .none { color: var(--muted); border: 0; }
+#account-form { padding: 14px 18px 16px; border-top: 1px solid var(--line); }
+#account-form h3 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+#account-form input[type="text"] { display: block; width: 100%; margin: 0 0 8px; padding: 9px 11px 8px; border: 1px solid var(--line); border-radius: 4px; background: #1a2029; }
+#account-form label { display: flex; align-items: flex-start; gap: 8px; margin: 2px 0 8px; font-size: 13.5px; line-height: 1.35; }
+#account-form .buttons button { width: 100%; padding: 9px 10px 8px; border: 0; border-radius: 4px; background: var(--text); color: var(--ink); font-weight: 600; }
+#account-error { min-height: 18px; margin: 0 0 6px; color: var(--bad); font-size: 13px; }
+#account-secret { margin: 0 14px 12px; padding: 12px 14px; border: 1px solid var(--ok); border-radius: 6px; background: rgba(55, 214, 122, .1); }
+#account-secret p { margin: 0 0 8px; font-size: 13.5px; line-height: 1.4; }
+#account-secret output, #setup-password { display: block; margin: 0 0 10px; padding: 10px 12px; border-radius: 4px; background: #0b0e13; font: 600 18px/1.2 Consolas, "Cascadia Mono", monospace; letter-spacing: .04em; user-select: all; -webkit-user-select: all; overflow-wrap: anywhere; }
+#account-secret button { padding: 6px 12px 5px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+
+/* ---- first-time setup ---- */
+#setup { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 20px; background: rgba(8, 10, 14, .9); }
+#setup > * { width: 380px; max-width: 100%; padding: 24px; background: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
+#setup h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+#setup p { margin: 0 0 14px; color: var(--muted); line-height: 1.45; }
+#setup p b { color: var(--text); }
+#setup input { display: block; width: 100%; margin: 0 0 8px; padding: 10px 12px 9px; border: 1px solid var(--line); border-radius: 4px; background: rgba(255, 255, 255, .05); }
+#setup button { width: 100%; margin-top: 4px; padding: 10px 12px 9px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#setup button[type="submit"], #setup button.primary { border: 0; background: var(--text); color: var(--ink); font-weight: 600; }
+#setup-error { min-height: 20px; margin: 10px 0 0 !important; color: var(--bad) !important; }
+
+/* ---- right-click menu ---- */
+#menu {
+    position: fixed;
+    z-index: 20;
+    min-width: 200px;
+    max-width: 300px;
+    padding: 5px;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .55);
+}
+#menu .head { padding: 6px 10px 5px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#menu button { display: block; width: 100%; padding: 8px 10px 7px; border: 0; border-radius: 4px; background: transparent; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#menu button:hover { background: rgba(255, 255, 255, .09); }
+#menu button.danger { color: var(--bad); }
+#menu hr { margin: 5px 0; border: 0; border-top: 1px solid var(--line); }
+
+/* ---- new call form ---- */
+body.placing #view { cursor: crosshair; }
+#call-form {
+    position: fixed;
+    right: 16px;
+    bottom: 64px;
+    width: 320px;
+    max-width: calc(100vw - 32px);
+    z-index: 10;
+    padding: 18px 20px 16px;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--bad);
+    border-radius: 6px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .45);
+}
+#call-form h2 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+#call-form p { margin: 0 0 12px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+#call-template-row { display: flex; gap: 6px; }
+#call-template-row select { flex: 1; min-width: 0; }
+#call-template-row button { flex: none; margin: 0 0 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#call-template-remove { color: var(--bad); }
+#call-form select { display: block; width: 100%; margin: 0 0 8px; padding: 9px 8px 8px; border: 1px solid var(--line); border-radius: 4px; background: #1a2029; color: inherit; font: inherit; }
+#call-form input[type="text"] { display: block; width: 100%; margin: 0 0 8px; padding: 9px 11px 8px; border: 1px solid var(--line); border-radius: 4px; background: #1a2029; }
+#call-form label { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 10px; font-size: 13.5px; line-height: 1.35; }
+#call-form .buttons { display: flex; gap: 8px; margin-top: 4px; }
+#call-form .buttons button { flex: 1; padding: 9px 10px 8px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#call-form .buttons button.primary { background: var(--bad); border-color: transparent; color: #fff; font-weight: 600; }
+@media (max-width: 700px) { #call-form { left: 8px; right: 8px; bottom: 64px; width: auto; } }
+
+/* ---- vehicle icons on the map ---- */
+.marker.vehicle .dot {
+    left: -15px;
+    top: -15px;
+    width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    color: var(--vehicle);
+}
+.marker.vehicle .dot svg { display: block; width: 100%; height: 100%; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .7)); pointer-events: none; }
+.marker.vehicle .nose { display: none; }
+.marker.vehicle .name { left: 19px; }
+.marker.vehicle.selected .dot { box-shadow: none; }
+.marker.vehicle.selected .dot svg { filter: drop-shadow(0 0 4px #fff) drop-shadow(0 0 2px #fff); }
+
+/* ---- unit list ---- */
+#list .group { padding: 11px 12px 4px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .09em; text-transform: uppercase; }
+#list .group.is-free { color: var(--ok); }
+#list .group.is-route { color: var(--vehicle); }
+#list .group.is-scene { color: var(--foot); }
+#list .group.is-busy { color: #c78bff; }
+.marker.away { opacity: .5; }
+#list .main { flex: 1; min-width: 0; }
+#list .main .who { display: block; }
+#list .sub { display: block; margin-top: 1px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- call signs, cars ---- */
+#unit { margin: 0 14px 10px; }
+#unit label { display: block; margin: 0 0 5px; color: var(--muted); font-size: 13px; line-height: 1.35; }
+#unit .join { display: flex; gap: 6px; }
+#unit input { flex: 1; min-width: 0; padding: 8px 10px 7px; border: 1px solid var(--line); border-radius: 4px; background: rgba(255, 255, 255, .05); }
+#unit button { padding: 8px 12px 7px; border: 1px solid var(--line); border-radius: 4px; background: transparent; }
+#unit button:hover { background: rgba(255, 255, 255, .08); }
+#unit.many .join { display: none; }
+#unit #unit-clear { margin-top: 6px; padding: 0; border: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; }
+#unit #unit-clear:hover { background: none; color: var(--text); }
+#select-box { position: fixed; z-index: 15; border: 1px dashed #fff; background: rgba(255, 255, 255, .1); pointer-events: none; }
+#list .cs { padding: 1px 6px 0; border-radius: 3px; background: rgba(255, 255, 255, .13); font-size: 12px; font-weight: 600; white-space: nowrap; }
+#list .cs:empty { display: none; }
+.marker.signed .name { font-weight: 600; }
+body.cars-only .marker:not(.vehicle) { display: none; }
+
+/* ---- sending mode: a call is chosen, clicks on units send them there ---- */
+#arm {
+    position: fixed;
+    z-index: 11;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100vw - 32px);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 9px 10px 8px 16px;
+    background: var(--bad);
+    color: #fff;
+    border-radius: 6px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, .5);
+    font-weight: 600;
+}
+#arm-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#arm button { flex: none; padding: 6px 11px 5px; border: 0; border-radius: 4px; background: rgba(0, 0, 0, .28); color: #fff; }
+#arm button:hover { background: rgba(0, 0, 0, .45); }
+.call.armed { z-index: 5; }
+.call.armed .call-pin { transform: scale(1.3); box-shadow: 0 0 0 3px #fff, 0 0 0 6px var(--bad); }
+.call.armed .name { box-shadow: 0 0 0 2px #fff; }
+#calls li.armed { background: rgba(255, 90, 79, .16); border-radius: 4px; box-shadow: inset 3px 0 0 var(--bad); }
+body.arming .marker .dot { cursor: copy; }
+body.arming #list button { cursor: copy; }
+
+/* ---- pointing at a call or unit in the list lights it up on the map ---- */
+.call-pin, .call .name, .marker .dot { transition: transform .15s ease-out, box-shadow .15s; }
+.call.hot { z-index: 6; }
+.call.hot .call-pin { transform: scale(1.5); box-shadow: 0 0 0 3px #fff, 0 0 22px 8px rgba(255, 255, 255, .55); }
+.call.hot .name { transform: translateX(8px) scale(1.12); transform-origin: left center; box-shadow: 0 0 0 2px #fff; }
+.call.hot::before {
+    content: "";
+    position: absolute;
+    left: -42px;
+    top: -42px;
+    width: 84px;
+    height: 84px;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    animation: hot-ring 1s ease-out infinite;
+    pointer-events: none;
+}
+@keyframes hot-ring { from { transform: scale(.3); opacity: 1; } to { transform: scale(1.25); opacity: 0; } }
+#markers.focus .call:not(.hot) { opacity: .35; }
+.route.hot { opacity: 1; border-top: 3px dashed #fff; }
+#calls li.hot { background: rgba(255, 255, 255, .07); border-radius: 4px; }
+.marker.hot { z-index: 5; }
+.marker.hot .dot { transform: scale(1.5); box-shadow: 0 0 0 3px #fff, 0 0 18px 6px rgba(255, 255, 255, .5); }
+.marker.vehicle.hot .dot { box-shadow: none; }
+.marker.vehicle.hot .dot svg { filter: drop-shadow(0 0 5px #fff) drop-shadow(0 0 3px #fff); }
+@media (prefers-reduced-motion: reduce) { .call.hot::before { animation: none; opacity: .8; } }
+
+/* ---- call priority: P1 red and pulsing, P2 orange, P3 grey ---- */
+.call.p2 .call-pin, .call.p2 .name { background: var(--vehicle); color: #10141b; }
+.call.p3 .call-pin, .call.p3 .name { background: #5d6878; color: #fff; }
+.call.p2 .call-pin::after, .call.p3 .call-pin::after { display: none; }
+.call.panic .call-pin::after { animation-duration: .7s; }
+#calls li.p1 .what { color: var(--bad); }
+#calls li.p3 .what { color: var(--muted); }
+
+/* ---- jobs ---- */
+#list .job { color: var(--muted); font-size: 12px; white-space: nowrap; }
+#list .job:empty { display: none; }
+#jobs { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 11px 20px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+#jobs span { display: flex; align-items: center; gap: 7px; }
+#jobs i { width: 9px; height: 9px; border-radius: 50%; }
+#jobs + #legend { border-top: 0; }
+body.has-jobs #legend i { background: #fff; }
+
+/* ---- controls ---- */
+#controls {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+}
+#status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 13px 7px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+}
+#status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+#status.off::before { background: var(--bad); }
+
+.tools { display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.tools button { width: 40px; height: 38px; border: 0; background: transparent; font-size: 19px; line-height: 1; }
+.tools button + button { border-top: 1px solid var(--line); }
+.tools button:hover { background: rgba(255, 255, 255, .08); }
+.tools button.wide { width: auto; padding: 0 12px; font-size: 13px; }
+.tools button[aria-pressed="false"] { color: var(--muted); }
+
+#toggle-panel { display: none; }
+
+/* ---- radio (Config.Voice) ---- */
+#radio {
+    width: 200px;
+    padding: 12px 13px 11px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+}
+#radio label { display: block; margin: 0 0 5px; color: var(--muted); font-size: 13px; }
+#radio .join { display: flex; gap: 6px; }
+#radio input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px 7px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, .05);
+}
+#radio input:disabled { color: var(--muted); }
+#radio .vol { margin: 10px 0 2px; }
+#radio input[type="range"] { display: block; width: 100%; margin: 0; padding: 0; border: 0; background: none; accent-color: var(--text); }
+#radio button {
+    padding: 8px 12px 7px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+}
+#radio button:hover:not(:disabled) { background: rgba(255, 255, 255, .08); }
+#radio button:disabled { opacity: .4; cursor: default; }
+#radio-talk {
+    width: 100%;
+    margin-top: 8px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#radio #radio-talk.live { background: var(--bad); border-color: transparent; font-weight: 600; }
+#radio-note { min-height: 18px; margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.35; }
+#radio-note.bad { color: var(--bad); }
+#radio-note.heard { color: var(--ok); }
+body.calibrating #radio { display: none; }
+
+/* ---- coordinates under the cursor ---- */
+#coords {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    padding: 8px 13px 7px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+#coords.copied { color: var(--ok); }
+
+/* ---- calibration (open the map with ?calibrate) ---- */
+#cal {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    width: 340px;
+    max-height: calc(100vh - 250px);
+    overflow-y: auto;
+    padding: 18px 20px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, .45);
+}
+#cal h2 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
+#cal p { margin: 0 0 12px; color: var(--muted); font-size: 13.5px; line-height: 1.45; }
+#cal label { display: block; margin: 0 0 4px; font-size: 13px; color: var(--muted); }
+#cal select, #cal input {
+    width: 100%;
+    padding: 8px 10px 7px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: #1a2029;
+}
+#cal .xy { display: flex; gap: 8px; margin: 8px 0 12px; }
+#cal .xy div { flex: 1; }
+#cal #cal-next { color: var(--vehicle); }
+#cal-points { margin: 0 0 12px; padding: 0; list-style: none; font-size: 13px; font-variant-numeric: tabular-nums; }
+#cal-points li { display: flex; gap: 8px; padding: 3px 0; color: var(--muted); }
+#cal-points b { color: var(--text); font-weight: 600; min-width: 16px; }
+#cal-quality.bad { color: var(--bad); }
+#cal-quality.good { color: var(--ok); }
+#cal pre {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 4px;
+    background: #0b0e13;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    user-select: text;
+    overflow-x: auto;
+}
+#cal .buttons { display: flex; gap: 8px; }
+#cal .buttons button {
+    flex: 1;
+    padding: 9px 10px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+}
+#cal .buttons button.primary { background: var(--text); color: var(--ink); border-color: transparent; font-weight: 600; }
+#cal .buttons button:disabled { opacity: .4; cursor: default; }
+
+.cal-pin { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 3; pointer-events: none; }
+.cal-pin span {
+    position: absolute;
+    left: -11px;
+    top: -11px;
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--vehicle);
+    color: #10141b;
+    border: 2px solid #fff;
+    font-size: 12px;
+    font-weight: 700;
+    box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .65);
+}
+body.calibrating #view { cursor: crosshair; }
+body.calibrating #coords { display: none; }
+
+/* ---- login ---- */
+#login {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(8, 10, 14, .82);
+    padding: 20px;
+}
+#login form {
+    width: 320px;
+    max-width: 100%;
+    padding: 24px;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+}
+#login h2 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+#login p { margin: 0 0 16px; color: var(--muted); line-height: 1.4; }
+#login input {
+    width: 100%;
+    padding: 10px 12px 9px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, .05);
+}
+#login button {
+    width: 100%;
+    margin-top: 10px;
+    padding: 10px 12px 9px;
+    border: 0;
+    border-radius: 4px;
+    background: var(--text);
+    color: var(--ink);
+    font-weight: 600;
+}
+#login input + input { margin-top: 8px; }
+#login-error { min-height: 20px; margin: 10px 0 0; color: var(--bad); }
+
+/* ---- phones ---- */
+@media (max-width: 700px) {
+    #panel {
+        top: auto;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        width: auto;
+        max-height: 55vh;
+    }
+    #panel.closed #search, #panel.closed #list, #panel.closed #legend, #panel.closed #calls, #panel.closed #jobs, #panel.closed #unit, #panel.closed #duty-box { display: none; }
+    #panel header { display: flex; align-items: baseline; gap: 12px; padding: 13px 16px 11px; }
+    #panel h1 { font-size: 18px; }
+    #count { margin: 0; flex: 1; }
+    #toggle-panel { display: block; border: 0; background: transparent; color: var(--muted); padding: 0; }
+    #controls { top: 8px; right: 8px; }
+    #coords { top: 8px; left: 8px; right: auto; bottom: auto; }
+    #cal { left: 8px; right: 8px; bottom: 64px; width: auto; max-height: 50vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .marker { transition: none; }
+}
+</style>
+</head>
+<body>
+    <div id="view">
+        <div id="stage">
+            <img id="map-img" alt="" draggable="false">
+            <div id="map-missing" hidden>The map picture could not be loaded.<br>Check Config.MapImage.</div>
+        </div>
+        <div id="markers"></div>
+    </div>
+
+    <aside id="panel" class="closed">
+        <header>
+            <h1 id="title">Dispatch</h1>
+            <p id="count"></p>
+            <button id="toggle-panel" type="button">Units</button>
+        </header>
+        <div id="duty-box">
+            <p id="account" hidden><span>Logged in as <b id="account-name"></b></span><button id="logout" type="button">Log out</button></p>
+            <form id="duty">
+                <input id="duty-name" type="text" maxlength="24" placeholder="Your name" aria-label="Your name" autocomplete="off">
+                <button id="duty-toggle" type="submit">Go on duty</button>
+            </form>
+            <p id="duty-info"></p>
+            <label id="mode-row" for="self-mode">Units take calls themselves
+                <select id="self-mode">
+                    <option value="auto">only when no dispatcher is on duty</option>
+                    <option value="always">always</option>
+                    <option value="never">never, the dispatcher sends them</option>
+                </select>
+            </label>
+        </div>
+        <section id="calls" hidden>
+            <h2 id="calls-title">Calls</h2>
+            <p id="calls-note" role="status"></p>
+            <ul id="calls-list"></ul>
+        </section>
+        <input id="search" type="search" placeholder="Find a unit" aria-label="Find a unit" autocomplete="off">
+        <form id="unit" hidden>
+            <label for="unit-cs" id="unit-who"></label>
+            <div class="join">
+                <input id="unit-cs" type="text" maxlength="12" placeholder="Call sign, e.g. A-12" autocomplete="off">
+                <button type="submit">Save</button>
+            </div>
+            <button id="unit-clear" type="button">Clear selection</button>
+        </form>
+        <ul id="list"></ul>
+        <div id="jobs" hidden></div>
+        <div id="legend">
+            <span><i></i>On foot</span>
+            <span class="veh"><i></i>In a vehicle</span>
+        </div>
+    </aside>
+
+    <div id="controls">
+        <div id="status">Connecting</div>
+        <div class="tools">
+            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+            <button id="zoom-out" type="button" aria-label="Zoom out">&minus;</button>
+        </div>
+        <div class="tools">
+            <button id="fit" type="button" class="wide">Whole map</button>
+            <button id="names" type="button" class="wide" aria-pressed="true">Names</button>
+            <button id="autofocus" type="button" class="wide" aria-pressed="true">Auto focus</button>
+            <button id="cars" type="button" class="wide" aria-pressed="false">Cars only</button>
+            <button id="new-call" type="button" class="wide" aria-pressed="false">New call</button>
+            <button id="accounts-open" type="button" class="wide" aria-pressed="false" hidden>Accounts</button>
+            <button id="templates-open" type="button" class="wide" aria-pressed="false">Templates</button>
+            <button id="history-open" type="button" class="wide" aria-pressed="false">History</button>
+        </div>
+        <div id="radio" hidden>
+            <label for="radio-ch">Radio channel</label>
+            <div class="join">
+                <input id="radio-ch" type="text" maxlength="32" placeholder="1" autocomplete="off">
+                <button id="radio-join" type="button">Join</button>
+            </div>
+            <button id="radio-talk" type="button" disabled>Hold to talk (Space)</button>
+            <label for="radio-vol" class="vol">Volume</label>
+            <input id="radio-vol" type="range" min="0" max="100" value="50">
+            <p id="radio-note" role="status"></p>
+        </div>
+    </div>
+
+    <div id="coords" hidden></div>
+
+    <aside id="cal" hidden>
+        <h2>Line up a new map picture</h2>
+        <p>Mark two or more places whose game position you know. Pick spots far apart for the best result.</p>
+
+        <label for="cal-player">Use a player's current position (ask them to stand still)</label>
+        <select id="cal-player"><option value="">Type the position myself</option></select>
+        <div class="xy">
+            <div><label for="cal-x">Game X</label><input id="cal-x" type="number" step="any" inputmode="decimal"></div>
+            <div><label for="cal-y">Game Y</label><input id="cal-y" type="number" step="any" inputmode="decimal"></div>
+        </div>
+        <p id="cal-next"></p>
+
+        <ul id="cal-points"></ul>
+        <p id="cal-quality" hidden></p>
+        <pre id="cal-result" hidden></pre>
+        <div class="buttons">
+            <button id="cal-copy" type="button" class="primary" disabled>Copy for config.lua</button>
+            <button id="cal-undo" type="button" disabled>Undo last</button>
+        </div>
+    </aside>
+
+    <aside id="accounts" hidden>
+        <header>
+            <h2>Accounts</h2>
+            <button id="accounts-close" type="button" aria-label="Close accounts">Close</button>
+        </header>
+        <div id="account-secret" hidden>
+            <p>Password for <b id="account-secret-name"></b>. Pass it on now: it is shown only this once.</p>
+            <output id="account-secret-password"></output>
+            <button id="account-secret-copy" type="button">Copy</button>
+        </div>
+        <ul id="accounts-list"></ul>
+        <form id="account-form">
+            <h3>New account</h3>
+            <input id="account-user" type="text" maxlength="24" placeholder="Username" aria-label="Username" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+            <label><input id="account-admin" type="checkbox"><span>Admin: may manage accounts, templates and who sends units</span></label>
+            <p id="account-error" role="alert"></p>
+            <div class="buttons"><button type="submit" class="primary">Add account, show its password</button></div>
+        </form>
+    </aside>
+
+    <aside id="templates" hidden>
+        <header>
+            <h2>Call templates</h2>
+            <button id="templates-close" type="button" aria-label="Close templates">Close</button>
+        </header>
+        <ul id="templates-list"></ul>
+        <form id="template-form">
+            <h3 id="template-form-title">New template</h3>
+            <input id="template-title" type="text" maxlength="60" placeholder="Title, e.g. Shots fired" aria-label="Title" autocomplete="off" required>
+            <input id="template-text" type="text" maxlength="300" placeholder="Details (optional)" aria-label="Details" autocomplete="off">
+            <div class="pair">
+                <input id="template-code" type="text" maxlength="12" placeholder="Code (optional)" aria-label="Code" autocomplete="off">
+                <select id="template-priority" aria-label="Priority">
+                    <option value="1">P1 · High</option>
+                    <option value="2" selected>P2 · Normal</option>
+                    <option value="3">P3 · Low</option>
+                </select>
+            </div>
+            <div class="buttons">
+                <button id="template-save" type="submit" class="primary">Add template</button>
+                <button id="template-cancel" type="button" hidden>Cancel</button>
+            </div>
+        </form>
+    </aside>
+
+    <div id="arm" role="status" hidden>
+        <span id="arm-text"></span>
+        <button id="arm-done" type="button">Done (Esc)</button>
+    </div>
+
+    <aside id="history" hidden>
+        <header>
+            <h2>History</h2>
+            <button id="history-close" type="button" aria-label="Close history">Close</button>
+        </header>
+        <input id="history-filter" type="search" placeholder="Filter: unit, call, dispatcher" aria-label="Filter history" autocomplete="off">
+        <ul id="history-list"></ul>
+    </aside>
+
+    <div id="menu" role="menu" hidden></div>
+    <div id="select-box" hidden></div>
+
+    <form id="call-form" hidden>
+        <h2 id="call-form-title">New call</h2>
+        <p id="call-where"></p>
+        <div id="call-template-row" hidden>
+            <select id="call-template" aria-label="Template"></select>
+            <button id="call-template-update" type="button" hidden>Update</button>
+            <button id="call-template-remove" type="button" hidden>Delete</button>
+        </div>
+        <input id="call-title" type="text" maxlength="60" placeholder="What is it? e.g. Shots fired" aria-label="Title" autocomplete="off" required>
+        <input id="call-text" type="text" maxlength="300" placeholder="Details (optional)" aria-label="Details" autocomplete="off">
+        <input id="call-code" type="text" maxlength="12" placeholder="Code, e.g. 10-71 (optional)" aria-label="Code" autocomplete="off">
+        <select id="call-priority" aria-label="Priority">
+            <option value="1">P1 · High priority</option>
+            <option value="2" selected>P2 · Normal priority</option>
+            <option value="3">P3 · Low priority</option>
+        </select>
+        <label id="call-save-row"><input id="call-save-template" type="checkbox"><span>Save this as a new template</span></label>
+        <label id="call-send-row"><input id="call-send" type="checkbox" checked><span id="call-send-who"></span></label>
+        <div class="buttons">
+            <button id="call-submit" type="submit" class="primary">Create call</button>
+            <button id="call-cancel" type="button">Cancel</button>
+        </div>
+    </form>
+
+    <div id="setup" hidden>
+        <form id="setup-form">
+            <h2>First-time setup</h2>
+            <p>There is no dispatcher account yet. Create the first admin here. The setup code is printed in the server console (for example the txAdmin live console) when this resource starts.</p>
+            <input id="setup-user" type="text" maxlength="24" value="admin" placeholder="Username" aria-label="Username" autocomplete="off" autocapitalize="none" spellcheck="false">
+            <input id="setup-code" type="text" inputmode="numeric" maxlength="6" placeholder="Setup code from the server console" aria-label="Setup code" autocomplete="off">
+            <button type="submit">Create the admin account</button>
+            <p id="setup-error" role="alert"></p>
+        </form>
+        <div id="setup-done" hidden>
+            <h2>Save this password now</h2>
+            <p>This is the password for <b id="setup-name"></b>. It is shown only this once and is not stored anywhere in readable form.</p>
+            <output id="setup-password"></output>
+            <button id="setup-copy" type="button">Copy</button>
+            <button id="setup-continue" type="button" class="primary">I saved it, go to the login</button>
+        </div>
+    </div>
+
+    <div id="login" hidden>
+        <form>
+            <h2>Log in</h2>
+            <p>Use your dispatcher account. Ask the server staff if you do not have one.</p>
+            <input id="username" type="text" maxlength="24" placeholder="Username" aria-label="Username" autocomplete="username" autocapitalize="none" spellcheck="false">
+            <input id="password" type="password" placeholder="Password" aria-label="Password" autocomplete="current-password">
+            <button type="submit">Log in</button>
+            <p id="login-error" role="alert"></p>
+        </form>
+    </div>
+
+<script>
+(() => {
+    const cfg = __LIVEMAP_CONFIG__;
+    let cal = cfg.calibration || { size: 4096, zeroX: 1877.25, zeroY: 2765, scale: 3.037861303705727 };
+    const calibrating = /[?&#]calibrate\b/.test(location.search + location.hash);
+    const interval = Math.max(500, cfg.interval || 2000);
+    const base = location.pathname.replace(/index\.html$/, '').replace(/\/?$/, '/');
+    const $ = (id) => document.getElementById(id);
+
+    const view = $('view'), stage = $('stage'), img = $('map-img'), layer = $('markers');
+    const KEY_NAME = 'livemap-key:' + base;
+
+    let size = cal.size;                 // picture width in px
+    let sizeH = cal.size;                // picture height in px
+    let cam = { x: 0, y: 0, k: 1 };
+    let minK = 0.1;
+    let players = new Map();             // id -> { data, el, row }
+    let selected = null;
+    let filter = '';
+    let timer = null;
+    let key = '';
+    try { key = sessionStorage.getItem(KEY_NAME) || ''; } catch (e) { /* storage unavailable */ }
+    // after a password login the server hands out a session token; from then on that is sent instead of the password
+    let keyIsToken = /^t[0-9a-f]{32}$/.test(key);
+    if (!keyIsToken) key = '';           // anything else left over from an older version is useless now
+    let loginUser = '';
+
+    function loginHeaders() {
+        if (!key) return {};
+        return keyIsToken ? { 'X-Livemap-Key': key } : { 'X-Livemap-Key': key, 'X-Livemap-User': loginUser };
+    }
+
+    document.title = cfg.title || 'Dispatch';
+    $('title').textContent = cfg.title || 'Dispatch';
+    document.documentElement.style.setProperty('--glide', interval + 'ms');
+
+    // ---- camera ----
+    // smooth = glide along with the followed player instead of jumping
+    let placedK = 0;
+
+    function place(entry) {
+        const m = toMap(entry.data.x, entry.data.y);
+        entry.el.style.transform = `translate(${Math.round(m.x * cam.k)}px, ${Math.round(m.y * cam.k)}px)`;
+    }
+
+    function apply(smooth) {
+        const t = smooth ? `transform ${interval}ms linear` : 'none';
+        stage.style.transition = layer.style.transition = t;
+        stage.style.transform = `translate(${cam.x}px, ${cam.y}px) scale(${cam.k})`;
+        layer.style.transform = `translate(${Math.round(cam.x)}px, ${Math.round(cam.y)}px)`;
+
+        // zoom changed: every marker gets a new on-screen position, without gliding there
+        if (cam.k !== placedK) {
+            placedK = cam.k;
+            layer.classList.add('snap');
+            players.forEach(place);
+            calls.forEach(placeCall);
+            drawRoutes();
+            placeCalPins();
+            void layer.offsetWidth;
+            layer.classList.remove('snap');
+        }
+    }
+
+    function fit() {
+        // on wide screens keep the map clear of the player list
+        const inset = window.innerWidth > 700 ? 322 : 0;
+        const w = view.clientWidth - inset, h = view.clientHeight;
+        const k = Math.min(w / size, h / sizeH);
+        minK = k * 0.6;
+        cam = { k, x: inset + (w - size * k) / 2, y: (h - sizeH * k) / 2 };
+        apply();
+    }
+
+    function zoomAt(px, py, factor) {
+        const k = Math.min(6, Math.max(minK, cam.k * factor));
+        const ratio = k / cam.k;
+        cam.x = px - (px - cam.x) * ratio;
+        cam.y = py - (py - cam.y) * ratio;
+        cam.k = k;
+        apply();
+    }
+
+    function centerOn(mx, my, k, smooth) {
+        if (k) cam.k = Math.max(cam.k, k);
+        cam.x = view.clientWidth / 2 - mx * cam.k;
+        cam.y = view.clientHeight / 2 - my * cam.k;
+        apply(smooth);
+    }
+
+    // game coordinates -> map pixels
+    function toMap(x, y) {
+        const f = size / cal.size;
+        return { x: (cal.zeroX + x / cal.scale) * f, y: (cal.zeroY - y / cal.scale) * f };
+    }
+
+    // map pixels -> game coordinates (the reverse of toMap)
+    function toGame(mx, my) {
+        const f = size / cal.size;
+        return { x: (mx / f - cal.zeroX) * cal.scale, y: (cal.zeroY - my / f) * cal.scale };
+    }
+
+    function gameAt(clientX, clientY) {
+        return toGame((clientX - cam.x) / cam.k, (clientY - cam.y) / cam.k);
+    }
+
+    // ---- coordinates under the cursor, click to copy ----
+    const coords = $('coords');
+    let copiedTimer = null;
+
+    // one decimal, and never "-0.0"
+    const fmt = (v) => (Math.round(v * 10) / 10 || 0).toFixed(1);
+
+    function showCoords(clientX, clientY) {
+        if (copiedTimer) return;
+        const g = gameAt(clientX, clientY);
+        coords.hidden = false;
+        coords.textContent = `X ${fmt(g.x)}   Y ${fmt(g.y)}`;
+    }
+
+    function copyText(text) {
+        // navigator.clipboard needs HTTPS; the map usually runs on plain HTTP, so use the old way
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { /* not available */ }
+        area.remove();
+        return ok;
+    }
+
+    function copyCoords(clientX, clientY) {
+        const g = gameAt(clientX, clientY);
+        const text = `${fmt(g.x)}, ${fmt(g.y)}`;
+        const ok = copyText(text);
+        clearTimeout(copiedTimer);
+        coords.hidden = false;
+        coords.classList.toggle('copied', ok);
+        coords.textContent = ok ? `Copied ${text}` : text;
+        copiedTimer = setTimeout(() => { copiedTimer = null; coords.classList.remove('copied'); }, 1500);
+    }
+
+    // ---- calibration: fit game coordinates to a new picture from a few marked places ----
+    const calPoints = [];      // { gx, gy, px, py, el }  (px, py in picture pixels)
+
+    function placeCalPins() {
+        calPoints.forEach((p) => {
+            p.el.style.transform = `translate(${Math.round(p.px * cam.k)}px, ${Math.round(p.py * cam.k)}px)`;
+        });
+    }
+
+    // least-squares fit of: px = zeroX + gx / scale,  py = zeroY - gy / scale
+    function solveCalibration(points) {
+        const n = points.length;
+        if (n < 2) return null;
+        const mean = (key) => points.reduce((sum, p) => sum + p[key], 0) / n;
+        const mgx = mean('gx'), mgy = mean('gy'), mpx = mean('px'), mpy = mean('py');
+
+        let top = 0, bottom = 0;
+        points.forEach((p) => {
+            top += (p.gx - mgx) * (p.px - mpx) - (p.gy - mgy) * (p.py - mpy);
+            bottom += (p.gx - mgx) ** 2 + (p.gy - mgy) ** 2;
+        });
+        const k = top / bottom;                      // picture pixels per game unit
+        if (!isFinite(k) || k <= 0) return null;
+
+        const result = { size, zeroX: mpx - k * mgx, zeroY: mpy + k * mgy, scale: 1 / k };
+        // how far the marked places end up from where they were clicked, in pixels
+        result.error = points.reduce((sum, p) =>
+            sum + Math.hypot(result.zeroX + p.gx * k - p.px, result.zeroY - p.gy * k - p.py), 0) / n;
+        return result;
+    }
+
+    function calSnippet(c) {
+        const r = (v, d) => Number(v.toFixed(d));
+        return 'Config.Calibration = {\n'
+            + `    size  = ${c.size},\n`
+            + `    zeroX = ${r(c.zeroX, 2)},\n`
+            + `    zeroY = ${r(c.zeroY, 2)},\n`
+            + `    scale = ${r(c.scale, 6)},\n`
+            + '}';
+    }
+
+    function renderCal() {
+        const list = $('cal-points');
+        list.textContent = '';
+        calPoints.forEach((p, i) => {
+            const li = document.createElement('li');
+            const b = document.createElement('b');
+            b.textContent = i + 1;
+            li.append(b, `game ${fmt(p.gx)}, ${fmt(p.gy)}  at pixel ${Math.round(p.px)}, ${Math.round(p.py)}`);
+            list.appendChild(li);
+        });
+
+        const solved = solveCalibration(calPoints);
+        const quality = $('cal-quality'), result = $('cal-result');
+        $('cal-undo').disabled = calPoints.length === 0;
+        $('cal-copy').disabled = !solved;
+        result.hidden = !solved;
+        quality.hidden = calPoints.length < 2;
+
+        if (solved) {
+            cal = { size: solved.size, zeroX: solved.zeroX, zeroY: solved.zeroY, scale: solved.scale };
+            result.textContent = calSnippet(solved);
+            const bad = solved.error > size * 0.005;
+            quality.className = calPoints.length > 2 ? (bad ? 'bad' : 'good') : '';
+            quality.textContent = calPoints.length === 2
+                ? 'Players on the map now use this result. Add a third place to check how well it fits.'
+                : bad ? `The places disagree by about ${solved.error.toFixed(0)} px. One of them is probably off: undo and mark it again.`
+                      : `Good fit: the places agree to within ${Math.max(1, Math.round(solved.error))} px.`;
+            layer.classList.add('snap');
+            players.forEach(place);
+            void layer.offsetWidth;
+            layer.classList.remove('snap');
+        } else if (calPoints.length >= 2) {
+            quality.className = 'bad';
+            quality.textContent = 'These places cannot be used together. Pick spots that are far apart.';
+        }
+        updateCalHint();
+    }
+
+    function calTarget() {
+        const chosen = players.get(Number($('cal-player').value));
+        if (chosen) return { gx: chosen.data.x, gy: chosen.data.y };
+        const gx = parseFloat($('cal-x').value), gy = parseFloat($('cal-y').value);
+        return isFinite(gx) && isFinite(gy) ? { gx, gy } : null;
+    }
+
+    function updateCalHint() {
+        const chosen = players.get(Number($('cal-player').value));
+        if (chosen) { $('cal-x').value = chosen.data.x; $('cal-y').value = chosen.data.y; }
+        $('cal-x').disabled = $('cal-y').disabled = !!chosen;
+        $('cal-next').textContent = calTarget()
+            ? `Now click the exact spot on the map for place ${calPoints.length + 1}.`
+            : 'Choose a player or type a position first.';
+    }
+
+    function addCalPoint(clientX, clientY) {
+        const target = calTarget();
+        if (!target) { updateCalHint(); return; }
+
+        const el = document.createElement('div');
+        el.className = 'cal-pin';
+        const badge = document.createElement('span');
+        badge.textContent = calPoints.length + 1;
+        el.appendChild(badge);
+        layer.appendChild(el);
+
+        calPoints.push({ gx: target.gx, gy: target.gy, px: (clientX - cam.x) / cam.k, py: (clientY - cam.y) / cam.k, el });
+        placeCalPins();
+        $('cal-player').value = '';
+        $('cal-x').value = $('cal-y').value = '';
+        renderCal();
+    }
+
+    function refreshCalPlayers() {
+        if (!calibrating) return;
+        const box = $('cal-player');
+        const keep = box.value;
+        while (box.options.length > 1) box.remove(1);
+        [...players.values()].sort((a, b) => label(a.data).localeCompare(label(b.data))).forEach((e) => {
+            const o = document.createElement('option');
+            o.value = e.data.id;
+            o.textContent = `${label(e.data)} (${e.data.id})`;
+            box.appendChild(o);
+        });
+        box.value = players.has(Number(keep)) ? keep : '';
+        updateCalHint();
+    }
+
+    if (calibrating) {
+        document.body.classList.add('calibrating');
+        $('cal').hidden = false;
+        $('cal-player').addEventListener('change', updateCalHint);
+        $('cal-x').addEventListener('input', updateCalHint);
+        $('cal-y').addEventListener('input', updateCalHint);
+        $('cal-undo').onclick = () => { const p = calPoints.pop(); if (p) p.el.remove(); renderCal(); };
+        $('cal-copy').onclick = (e) => {
+            const ok = copyText($('cal-result').textContent);
+            e.currentTarget.textContent = ok ? 'Copied' : 'Select the text above';
+            setTimeout(() => { $('cal-copy').textContent = 'Copy for config.lua'; }, 1500);
+        };
+        updateCalHint();
+    }
+
+    // ---- pointer input: drag with one finger, pinch with two ----
+    const pointers = new Map();
+    let pinch = 0;
+    let moved = false;
+
+    view.addEventListener('pointerdown', (e) => {
+        if (e.button === 2 || e.target.closest('.dot, .call-pin')) return;
+        e.preventDefault();
+        view.setPointerCapture(e.pointerId);
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        moved = false;
+        view.classList.add('dragging');
+    });
+
+    view.addEventListener('pointermove', (e) => {
+        if (e.pointerType === 'mouse') showCoords(e.clientX, e.clientY);
+        const prev = pointers.get(e.pointerId);
+        if (!prev) return;
+        const now = { x: e.clientX, y: e.clientY };
+
+        if (pointers.size === 1) {
+            cam.x += now.x - prev.x;
+            cam.y += now.y - prev.y;
+            if (Math.abs(now.x - prev.x) + Math.abs(now.y - prev.y) > 2) moved = true;
+            pointers.set(e.pointerId, now);
+            apply();
+        } else if (pointers.size === 2) {
+            pointers.set(e.pointerId, now);
+            const [a, b] = [...pointers.values()];
+            const dist = Math.hypot(a.x - b.x, a.y - b.y);
+            if (pinch) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, dist / pinch);
+            pinch = dist;
+            moved = true;
+        }
+        if (moved && selected !== null) { picked.add(selected); select(null, true); }   // dragging stops following a player
+    });
+
+    const release = (e) => {
+        // a click or tap that did not drag the map copies the coordinates of that spot
+        if (e.type === 'pointerup' && pointers.has(e.pointerId) && pointers.size === 1 && !moved) {
+            if (calibrating) addCalPoint(e.clientX, e.clientY);
+            else if (placing) openCallForm(e.clientX, e.clientY);
+            else copyCoords(e.clientX, e.clientY);
+        }
+        pointers.delete(e.pointerId);
+        pinch = 0;
+        if (pointers.size === 0) view.classList.remove('dragging');
+    };
+    // the browser must never start its own drag-and-drop of the picture
+    view.addEventListener('dragstart', (e) => e.preventDefault());
+    view.addEventListener('pointerup', release);
+    view.addEventListener('pointercancel', release);
+
+    view.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015));
+    }, { passive: false });
+
+    $('zoom-in').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, 1.5);
+    $('zoom-out').onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, 1 / 1.5);
+    $('fit').onclick = () => { select(null, true); fit(); };
+    $('names').onclick = (e) => {
+        const on = document.body.classList.toggle('no-names');
+        e.currentTarget.setAttribute('aria-pressed', String(!on));
+    };
+    $('toggle-panel').onclick = () => $('panel').classList.toggle('closed');
+    window.addEventListener('resize', () => { if (!selected) fit(); });
+
+    // ---- players ----
+    function label(p) { return p.name || ('Player ' + p.id); }
+
+    function select(id, keepView) {
+        if (selected === id) return;
+        const old = players.get(selected);
+        if (old) { old.el.classList.remove('selected'); old.row.classList.remove('selected'); }
+        selected = id;
+        const cur = players.get(id);
+        if (cur) {
+            cur.el.classList.add('selected');
+            cur.row.classList.add('selected');
+            if (!keepView && autoFocus) { const m = toMap(cur.data.x, cur.data.y); centerOn(m.x, m.y, 1.2); }
+        }
+        showUnit();
+    }
+
+    function create(p) {
+        const el = document.createElement('div');
+        el.className = 'marker fresh';
+        el.innerHTML = '<div class="pin"><div class="nose"></div><div class="dot"></div><div class="name"></div></div>';
+        el.querySelector('.dot').addEventListener('click', (e) => clickUnit(p.id, e, true));
+        layer.appendChild(el);
+
+        const li = document.createElement('li');
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.innerHTML = '<span class="glyph"></span><span class="cs"></span><span class="who"></span><span class="st"></span><span class="job"></span><span class="ping"></span><span class="id"></span>';
+        row.addEventListener('click', () => {
+            select(null, true);
+            select(p.id);
+            if (window.innerWidth <= 700) $('panel').classList.add('closed');
+        });
+        li.appendChild(row);
+
+        return { el, row, li, data: p };
+    }
+
+    function update(list) {
+        const seen = new Set();
+
+        list.forEach((p) => {
+            seen.add(p.id);
+            let entry = players.get(p.id);
+            if (!entry) { entry = create(p); players.set(p.id, entry); }
+            entry.data = p;
+
+            place(entry);
+            entry.el.classList.toggle('vehicle', !!p.v);
+            // on foot: a round dot. In a vehicle: an icon of that kind of vehicle, turned the way it is heading
+            const dot = entry.el.querySelector('.dot');
+            const kind = p.v ? (VEHICLE_ICONS[p.vt] ? p.vt : 'car') : '';
+            if (dot.dataset.kind !== kind) {
+                dot.dataset.kind = kind;
+                dot.innerHTML = kind ? VEHICLE_ICONS[kind] : '';
+            }
+            dot.style.background = kind ? '' : (p.c || '');
+            dot.style.color = kind ? (p.c || '') : '';
+            if (kind) dot.firstChild.style.transform = `rotate(${-(p.h || 0)}deg)`;
+            entry.el.querySelector('.name').textContent = label(p);
+            // GTA heading: 0 = north, counter-clockwise
+            entry.el.querySelector('.nose').style.transform = `rotate(${-(p.h || 0)}deg)`;
+            requestAnimationFrame(() => entry.el.classList.remove('fresh'));
+
+            entry.row.classList.toggle('vehicle', !!p.v);
+            entry.row.querySelector('.who').textContent = label(p);
+            entry.row.querySelector('.job').textContent = p.job || '';
+            entry.row.querySelector('.cs').textContent = p.cs || '';
+            const st = entry.row.querySelector('.st');
+            st.textContent = p.call ? (p.sc ? 'On scene' : 'En route') : (document.body.classList.contains('has-jobs') ? 'Free' : '');
+            st.classList.toggle('busy', !!p.call);
+            entry.row.querySelector('.glyph').style.background = p.c || '';
+            entry.row.querySelector('.id').textContent = p.name ? p.id : '';
+            entry.row.querySelector('.ping').textContent = typeof p.ping === 'number' ? p.ping + ' ms' : '';
+        });
+
+        players.forEach((entry, id) => {
+            if (seen.has(id)) return;
+            entry.el.remove();
+            entry.li.remove();
+            players.delete(id);
+            if (selected === id) selected = null;
+        });
+
+        showUnit();
+        renderList();
+        refreshCalPlayers();
+
+        const follow = players.get(selected);
+        if (follow && autoFocus && pointers.size === 0) {       // Auto focus off: the map stays where it is
+            const m = toMap(follow.data.x, follow.data.y);
+            centerOn(m.x, m.y, 0, true);
+        }
+    }
+
+    function renderPlayerList() {
+        const list = $('list');
+        const q = filter.trim().toLowerCase();
+        // crews next to each other: by call sign first, then by name
+        const order = (e) => (e.data.cs ? '0' + e.data.cs : '1') + '\n' + label(e.data);
+        const sorted = [...players.values()].sort((a, b) => order(a).localeCompare(order(b)));
+        const shown = sorted.filter((e) => !carsOnly || e.data.v).filter((e) => !q || label(e.data).toLowerCase().includes(q) || (e.data.job || '').toLowerCase().includes(q) || (e.data.cs || '').toLowerCase().includes(q) || String(e.data.id) === q);
+
+        list.textContent = '';
+        shown.forEach((e) => list.appendChild(e.li));
+
+        if (shown.length === 0) {
+            const empty = document.createElement('li');
+            empty.id = 'empty';
+            empty.textContent = players.size === 0 ? 'Nobody is online right now.' : 'No player matches that search.';
+            list.appendChild(empty);
+        }
+    }
+
+    $('search').addEventListener('input', (e) => { filter = e.target.value; renderList(); });
+
+    // ---- dispatch calls (added on the server with exports['notbad-dispatch']:addCall) ----
+    const calls = new Map();             // id -> { data, el, li, sub, units }
+    let callsLoaded = false, beepCtx = null, routes = [], noteTimer = null;
+    let hotCall = null;                  // the call under the mouse, in the list or on the map
+
+    // pointing at a call in the list lights it up on the map (and the other way round):
+    // bigger pin with a ring, its routes in white, the other calls dimmed
+    function setHot(id) {
+        hotCall = id;
+        calls.forEach((entry) => {
+            entry.el.classList.toggle('hot', entry.data.id === id);
+            entry.li.classList.toggle('hot', entry.data.id === id);
+        });
+        routes.forEach((el) => el.classList.toggle('hot', id !== null && el.dataset.call === String(id)));
+        layer.classList.toggle('focus', id !== null);
+    }
+
+    function callNote(text) {
+        $('calls-note').textContent = text;
+        clearTimeout(noteTimer);
+        noteTimer = setTimeout(() => { $('calls-note').textContent = ''; }, 3500);
+    }
+
+    // close / assign / unassign, then refresh straight away
+    function callAction(path) {
+        return fetch(base + path, { method: 'POST', headers: key ? { 'X-Livemap-Key': key } : {} })
+            .then(() => poll())
+            .catch(() => {});
+    }
+
+    // sends the selected player, together with everybody else in the same car
+    function sendUnit(id) {
+        const crew = chosenCrew();
+        if (!crew.length) return callNote('First pick a player or a car on the map or in the list, then press Send.');
+        Promise.all(crew.map((member) =>
+            fetch(`${base}calls/assign?id=${id}&unit=${member.data.id}`, { method: 'POST', headers: key ? { 'X-Livemap-Key': key } : {} }).catch(() => {})
+        )).then(() => poll());
+    }
+
+    // dashed line from every unit to the call it is sent to
+    function drawRoutes() {
+        routes.forEach((el) => el.remove());
+        routes = [];
+        calls.forEach((entry) => {
+            const to = toMap(entry.data.x, entry.data.y);
+            (Array.isArray(entry.data.units) ? entry.data.units : []).forEach((id) => {
+                const unit = players.get(id);
+                if (!unit) return;
+                const from = toMap(unit.data.x, unit.data.y);
+                const x = from.x * cam.k, y = from.y * cam.k;
+                const dx = to.x * cam.k - x, dy = to.y * cam.k - y;
+                const el = document.createElement('div');
+                el.className = 'route' + (hotCall === entry.data.id ? ' hot' : '');
+                el.dataset.call = entry.data.id;
+                el.style.width = Math.hypot(dx, dy) + 'px';
+                el.style.transform = `translate(${x}px, ${y}px) rotate(${Math.atan2(dy, dx)}rad)`;
+                layer.prepend(el);
+                routes.push(el);
+            });
+        });
+    }
+
+    function placeCall(entry) {
+        const m = toMap(entry.data.x, entry.data.y);
+        entry.el.style.transform = `translate(${Math.round(m.x * cam.k)}px, ${Math.round(m.y * cam.k)}px)`;
+    }
+
+    function ago(seconds) {
+        if (seconds < 60) return 'just now';
+        if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+        return `${Math.floor(seconds / 3600)} h ago`;
+    }
+
+    // two beeps for a new call, a longer and higher run for a priority 1 or panic call
+    function callBeep(urgent) {
+        try {
+            beepCtx = beepCtx || new (window.AudioContext || window.webkitAudioContext)();
+            beepCtx.resume();
+            (urgent ? [0, 0.2, 0.4, 0.6, 0.8] : [0, 0.22]).forEach((delay) => {
+                const osc = beepCtx.createOscillator(), gain = beepCtx.createGain();
+                const at = beepCtx.currentTime + delay;
+                osc.frequency.value = urgent ? 1175 : 880;
+                gain.gain.setValueAtTime(0.15, at);
+                gain.gain.exponentialRampToValueAtTime(0.001, at + 0.16);
+                osc.connect(gain); gain.connect(beepCtx.destination);
+                osc.start(at); osc.stop(at + 0.17);
+            });
+        } catch (e) { /* no sound, the call still shows */ }
+    }
+
+    // ---- sending mode: click a call, then click the units that should go there ----
+    let armedCall = null;
+
+    function setArmed(id) {
+        armedCall = calls.has(id) ? id : null;
+        calls.forEach((entry) => {
+            entry.el.classList.toggle('armed', entry.data.id === armedCall);
+            entry.li.classList.toggle('armed', entry.data.id === armedCall);
+        });
+        document.body.classList.toggle('arming', armedCall !== null);
+        $('arm').hidden = armedCall === null;
+        if (armedCall !== null) $('arm-text').textContent = `Click the units to send to: ${calls.get(armedCall).data.title}`;
+    }
+
+    // a click on a call (in the list or on the map) turns sending mode on for it, a second click turns it off
+    function focusCall(id) {
+        const entry = calls.get(id);
+        if (!entry) return;
+        if (armedCall === id) return setArmed(null);
+        setArmed(id);
+        select(null, true);
+        if (autoFocus) {
+            const m = toMap(entry.data.x, entry.data.y);
+            centerOn(m.x, m.y, 1.2);
+        }
+        if (window.innerWidth <= 700) $('panel').classList.add('closed');
+    }
+
+    function centerCall(id) {
+        const entry = calls.get(id);
+        if (!entry) return;
+        const m = toMap(entry.data.x, entry.data.y);
+        centerOn(m.x, m.y, 1.2);
+    }
+
+    $('arm-done').onclick = () => setArmed(null);
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && armedCall !== null) setArmed(null); });
+
+    function dropCall(id) {
+        const entry = calls.get(id);
+        if (!entry) return;
+        if (hotCall === id) setHot(null);
+        if (armedCall === id) setArmed(null);
+        entry.el.remove();
+        entry.li.remove();
+        calls.delete(id);
+        $('calls').hidden = calls.size === 0;
+        $('calls-title').textContent = `Calls (${calls.size})`;
+    }
+
+    function closeCall(id) {
+        dropCall(id);
+        drawRoutes();
+        callAction(`calls/close?id=${id}`);
+    }
+
+    function createCall(c) {
+        const el = document.createElement('div');
+        el.className = 'call';
+        const pin = document.createElement('div');
+        pin.className = 'call-pin';
+        pin.textContent = '!';
+        pin.addEventListener('click', () => focusCall(c.id));
+        pin.addEventListener('mouseenter', () => setHot(c.id));
+        pin.addEventListener('mouseleave', () => setHot(null));
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = c.title;
+        el.append(pin, name);
+        layer.appendChild(el);
+
+        const li = document.createElement('li');
+        li.addEventListener('mouseenter', () => setHot(c.id));
+        li.addEventListener('mouseleave', () => setHot(null));
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'open';
+        const what = document.createElement('span');
+        what.className = 'what';
+        what.textContent = c.title;
+        const sub = document.createElement('span');
+        sub.className = 'sub';
+        open.append(what, sub);
+        open.addEventListener('click', () => focusCall(c.id));
+        const done = document.createElement('button');
+        done.type = 'button';
+        done.className = 'done';
+        done.textContent = 'Done';
+        done.addEventListener('click', () => closeCall(c.id));
+        const send = document.createElement('button');
+        send.type = 'button';
+        send.className = 'done send';
+        send.textContent = 'Send';
+        send.title = 'Send the selected player to this call';
+        send.addEventListener('click', () => sendUnit(c.id));
+        const units = document.createElement('div');
+        units.className = 'units';
+        const acts = document.createElement('div');
+        acts.className = 'acts';
+        [['Edit', () => editCall(c.id)], ['Move', () => moveCall(c.id)]].forEach(([text, run]) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = text;
+            button.addEventListener('click', run);
+            acts.appendChild(button);
+        });
+        li.append(open, send, done, units, acts);
+        $('calls-list').prepend(li);      // newest on top
+
+        return { el, li, what, sub, units, data: c };
+    }
+
+    function updateCalls(list) {
+        const seen = new Set();
+        let fresh = false, urgent = false;
+        list.forEach((c) => {
+            seen.add(c.id);
+            let entry = calls.get(c.id);
+            if (!entry) { entry = createCall(c); calls.set(c.id, entry); fresh = true; if (c.panic || c.p === 1) urgent = true; }
+            entry.data = c;
+            placeCall(entry);
+            // how many units are on the call: on the pin, next to its name and in the list
+            const n = c.count || 0;
+            const responding = n ? `${n} ${n === 1 ? 'unit' : 'units'}` + (c.onScene ? `, ${c.onScene} on scene` : '') : 'No units yet';
+            const prio = c.p || 2;
+            entry.what.textContent = c.title;
+            const hot = (hotCall === c.id ? ' hot' : '') + (armedCall === c.id ? ' armed' : '');
+            entry.el.className = `call p${prio}` + (c.panic ? ' panic' : '') + hot;
+            entry.li.className = `p${prio}` + hot;
+            entry.el.querySelector('.call-pin').textContent = n || '!';
+            entry.el.querySelector('.name').textContent = n ? `${c.title} · ${n}` : c.title;
+            entry.sub.textContent = [`P${prio}`, responding, c.code, ago(c.age || 0), c.text].filter(Boolean).join(' · ');
+
+            // units on this call; click one to take it off again
+            const ids = Array.isArray(c.units) ? c.units : [];
+            const wanted = ids.join(',');
+            if (entry.units.dataset.ids !== wanted || ids.length) {
+                entry.units.dataset.ids = wanted;
+                entry.units.textContent = '';
+                // one chip per unit: players with the same call sign or car belong together
+                const groups = new Map();
+                ids.forEach((id) => {
+                    const unit = players.get(id);
+                    const sign = unit ? unit.data.cs : '';
+                    const group = sign ? 'c' + sign : (unit && unit.data.veh ? 'v' + unit.data.veh : 'p' + id);
+                    if (!groups.has(group)) groups.set(group, { sign, ids: [], names: [] });
+                    groups.get(group).ids.push(id);
+                    groups.get(group).names.push(unit ? label(unit.data) : 'Unit ' + id);
+                });
+                groups.forEach((group) => {
+                    const chip = document.createElement('button');
+                    chip.type = 'button';
+                    chip.title = `${group.names.join(', ')}: take off the call`;
+                    chip.textContent = `${group.sign || group.names.join(', ')} ×`;
+                    chip.addEventListener('click', () => {
+                        Promise.all(group.ids.map((id) => postTo(`calls/unassign?unit=${id}`))).then(() => poll());
+                    });
+                    entry.units.appendChild(chip);
+                });
+            }
+        });
+        [...calls.keys()].forEach((id) => { if (!seen.has(id)) dropCall(id); });
+
+        $('calls').hidden = calls.size === 0;
+        $('calls-title').textContent = `Calls (${calls.size})`;
+        // highest priority first, then newest; only touch the list when the order really changed
+        const order = [...calls.values()].sort((a, b) => (a.data.p || 2) - (b.data.p || 2) || b.data.id - a.data.id);
+        const wanted = order.map((entry) => entry.data.id).join(',');
+        if ($('calls-list').dataset.order !== wanted) {
+            $('calls-list').dataset.order = wanted;
+            order.forEach((entry) => $('calls-list').appendChild(entry.li));
+        }
+
+        drawRoutes();
+        if (fresh && callsLoaded) callBeep(urgent);     // not for calls that were already there when the map opened
+        callsLoaded = true;
+    }
+
+    // ---- new call from the map: press New call, click the place, fill in the form ----
+    // The same form edits an existing call; Move asks for a new place on the map.
+    let placing = false, callAt = null, editing = null, movingCall = null;
+
+    function setPlacing(on) {
+        placing = on;
+        if (!on) movingCall = null;
+        document.body.classList.toggle('placing', on);
+        $('new-call').setAttribute('aria-pressed', String(on));
+        $('new-call').textContent = on ? (movingCall !== null ? 'Click new place' : 'Click the map') : 'New call';
+    }
+
+    // ---- call templates: the ones from Config.Calls.Templates plus the ones saved here on the console ----
+    let templates = [], templatesKey = '';
+
+    // called with the list from the server on every refresh; rebuilds the box only when something changed
+    function setTemplates(list) {
+        const key = JSON.stringify(list);
+        if (key === templatesKey) return;
+        templatesKey = key;
+        templates = list;
+        const pick = $('call-template'), chosen = pick.value;
+        pick.textContent = '';
+        pick.appendChild(new Option('Template: none', ''));
+        templates.forEach((tpl) => pick.appendChild(new Option(`P${tpl.priority || 2} · ${tpl.title}`, tpl.id || tpl.title)));
+        pick.value = [...pick.options].some((option) => option.value === chosen) ? chosen : '';
+        $('call-template-row').hidden = templates.length === 0;
+        updateTemplateButtons();
+        if (!$('templates').hidden) renderTemplates();
+    }
+
+    const pickedTemplate = () => templates.find((tpl) => (tpl.id || tpl.title) === $('call-template').value);
+
+    // only templates saved on the console can be removed there; the ones from config.lua stay
+    function updateTemplateButtons() {
+        const tpl = pickedTemplate();
+        $('call-template-remove').hidden = !tpl || !!tpl.fixed;
+        $('call-template-update').hidden = !tpl || !!tpl.fixed;
+        $('call-template-update').textContent = 'Update';
+    }
+
+    const formValues = () => new URLSearchParams({
+        title: $('call-title').value.trim(), text: $('call-text').value.trim(),
+        code: $('call-code').value.trim(), p: $('call-priority').value,
+    });
+
+    // Update: the chosen template takes over what is in the form now (no call is created)
+    $('call-template-update').onclick = () => {
+        const tpl = pickedTemplate();
+        if (!tpl || tpl.fixed) return;
+        if (!$('call-title').value.trim()) { $('call-title').focus(); return; }
+        postTo(`templates/edit?id=${encodeURIComponent(tpl.id)}&${formValues()}`).then(() => {
+            $('call-template-update').textContent = 'Updated';
+            poll();
+        });
+    };
+
+    // choosing one fills in the form; everything can still be changed before saving
+    $('call-template').addEventListener('change', () => {
+        updateTemplateButtons();
+        const tpl = pickedTemplate();
+        if (!tpl) return;
+        $('call-title').value = tpl.title || '';
+        $('call-text').value = tpl.text || '';
+        $('call-code').value = tpl.code || '';
+        $('call-priority').value = String(tpl.priority || 2);
+        $('call-save-template').checked = false;
+        $('call-title').focus();
+    });
+
+    $('call-template-remove').onclick = () => {
+        const tpl = pickedTemplate();
+        if (!tpl || tpl.fixed) return;
+        $('call-template').value = '';
+        updateTemplateButtons();
+        postTo(`templates/remove?id=${encodeURIComponent(tpl.id)}`).then(() => poll());
+    };
+
+    // what is in the form right now, kept as a template for next time
+    function saveFormAsTemplate() {
+        return postTo(`templates/add?${formValues()}`);
+    }
+
+    // ---- Templates window: every template in one place; add, change and delete the saved ones ----
+    let templateEditing = null;          // id of the saved template in the form, null = adding a new one
+
+    function resetTemplateForm() {
+        templateEditing = null;
+        $('template-title').value = $('template-text').value = $('template-code').value = '';
+        $('template-priority').value = '2';
+        $('template-form-title').textContent = 'New template';
+        $('template-save').textContent = 'Add template';
+        $('template-cancel').hidden = true;
+    }
+
+    function editTemplate(tpl) {
+        templateEditing = tpl.id;
+        $('template-title').value = tpl.title || '';
+        $('template-text').value = tpl.text || '';
+        $('template-code').value = tpl.code || '';
+        $('template-priority').value = String(tpl.priority || 2);
+        $('template-form-title').textContent = 'Change template';
+        $('template-save').textContent = 'Save changes';
+        $('template-cancel').hidden = false;
+        renderTemplates();
+        $('template-title').focus();
+    }
+
+    function renderTemplates() {
+        const list = $('templates-list');
+        list.textContent = '';
+        if (templateEditing !== null && !templates.some((tpl) => tpl.id === templateEditing)) resetTemplateForm();
+        templates.forEach((tpl) => {
+            const li = document.createElement('li');
+            if (tpl.id === templateEditing) li.className = 'editing';
+            const prio = document.createElement('span');
+            prio.className = 'prio p' + (tpl.priority || 2);
+            prio.textContent = 'P' + (tpl.priority || 2);
+            const main = document.createElement('span');
+            main.className = 'main';
+            const title = document.createElement('span');
+            title.className = 'title';
+            title.textContent = tpl.title;
+            const sub = document.createElement('span');
+            sub.className = 'sub';
+            sub.textContent = [tpl.code, tpl.text].filter(Boolean).join(' · ') || 'No details';
+            main.append(title, sub);
+            li.append(prio, main);
+            if (tpl.fixed) {
+                const fixed = document.createElement('span');
+                fixed.className = 'fixed';
+                fixed.textContent = 'from config.lua';
+                li.appendChild(fixed);
+            } else {
+                const edit = document.createElement('button');
+                edit.type = 'button';
+                edit.textContent = 'Edit';
+                edit.addEventListener('click', () => editTemplate(tpl));
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.className = 'danger';
+                remove.textContent = 'Delete';
+                remove.addEventListener('click', () => {
+                    if (templateEditing === tpl.id) resetTemplateForm();
+                    postTo(`templates/remove?id=${encodeURIComponent(tpl.id)}`).then(() => poll());
+                });
+                li.append(edit, remove);
+            }
+            list.appendChild(li);
+        });
+        if (!templates.length) {
+            const none = document.createElement('li');
+            none.className = 'none';
+            none.textContent = 'No templates yet. Add the first one below.';
+            list.appendChild(none);
+        }
+    }
+
+    function toggleTemplates(open) {
+        if (open) { toggleHistory(false); if (!$('accounts').hidden) toggleAccounts(false); }
+        $('templates').hidden = !open;
+        $('templates-open').setAttribute('aria-pressed', String(open));
+        if (open) renderTemplates(); else resetTemplateForm();
+    }
+
+    $('templates-open').onclick = () => toggleTemplates($('templates').hidden);
+    $('templates-close').onclick = () => toggleTemplates(false);
+    $('template-cancel').onclick = () => { resetTemplateForm(); renderTemplates(); };
+    $('template-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const title = $('template-title').value.trim();
+        if (!title) return;
+        const values = new URLSearchParams({
+            title, text: $('template-text').value.trim(), code: $('template-code').value.trim(), p: $('template-priority').value,
+        });
+        const path = templateEditing !== null ? `templates/edit?id=${encodeURIComponent(templateEditing)}&${values}` : `templates/add?${values}`;
+        resetTemplateForm();
+        postTo(path).then(() => poll());
+    });
+
+    setTemplates(Array.isArray(cfg.templates) ? cfg.templates : []);
+
+    // a call straight from a template, no form; the chosen units are sent along
+    async function quickCall(point, tpl, crew) {
+        const params = new URLSearchParams({
+            x: point.x.toFixed(1), y: point.y.toFixed(1), title: tpl.title || 'Call',
+            text: tpl.text || '', code: tpl.code || '', p: tpl.priority || 2, job: tpl.job || '',
+        });
+        try {
+            const res = await postTo(`calls/add?${params}`);
+            const data = await res.json();
+            if (data && data.id && crew.length) return assignCrew(data.id, crew);
+        } catch (e) { /* nothing was created */ }
+        poll();
+    }
+
+    function closeCallForm() {
+        $('call-template').value = '';
+        $('call-save-template').checked = false;
+        updateTemplateButtons();
+        $('call-form').hidden = true;
+        $('call-title').value = $('call-text').value = $('call-code').value = '';
+        $('call-priority').value = '2';
+        callAt = null;
+        editing = null;
+    }
+
+    function editCall(id) {
+        const entry = calls.get(id);
+        if (!entry) return;
+        setPlacing(false);
+        closeCallForm();
+        editing = id;
+        $('call-form-title').textContent = 'Edit call';
+        $('call-submit').textContent = 'Save';
+        $('call-where').textContent = 'To change the place, use Move on the call.';
+        $('call-title').value = entry.data.title || '';
+        $('call-text').value = entry.data.text || '';
+        $('call-code').value = entry.data.code || '';
+        $('call-priority').value = String(entry.data.p || 2);
+        $('call-send-row').hidden = true;
+        $('call-form').hidden = false;
+        $('call-title').focus();
+    }
+
+    function moveCall(id) {
+        closeCallForm();
+        movingCall = id;
+        setPlacing(true);
+    }
+
+    function unitName(crew) {
+        const count = unitCount(crew);
+        if (count > 1) return `${count} units`;
+        const signed = crew.find((member) => member.data.cs);
+        const names = crew.map((member) => label(member.data)).join(', ');
+        return signed ? `${signed.data.cs} (${names})` : names;
+    }
+
+    function openCallForm(clientX, clientY) {
+        const point = gameAt(clientX, clientY);
+        if (movingCall !== null) {               // Move: the click is the call's new place
+            const id = movingCall;
+            setPlacing(false);
+            postTo(`calls/edit?id=${id}&x=${point.x.toFixed(1)}&y=${point.y.toFixed(1)}`).then(() => poll());
+            return;
+        }
+        setPlacing(false);
+        closeCallForm();
+        callAt = point;
+        $('call-form-title').textContent = 'New call';
+        $('call-submit').textContent = 'Create call';
+        const crew = chosenCrew();
+        $('call-where').textContent = `At X ${fmt(callAt.x)}, Y ${fmt(callAt.y)}`;
+        $('call-send-row').hidden = crew.length === 0;
+        $('call-send').checked = true;
+        $('call-send-who').textContent = crew.length ? `Send ${unitName(crew)} right away` : '';
+        $('call-form').hidden = false;
+        $('call-title').focus();
+    }
+
+    $('new-call').onclick = () => { closeCallForm(); setPlacing(!placing); };
+    $('call-cancel').onclick = closeCallForm;
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { setPlacing(false); closeCallForm(); }
+    });
+
+    $('call-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const title = $('call-title').value.trim();
+        if (!title) return;
+        if ($('call-save-template').checked) saveFormAsTemplate();
+        if (editing !== null) {
+            const changes = new URLSearchParams({ id: editing, title, text: $('call-text').value.trim(), code: $('call-code').value.trim(), p: $('call-priority').value });
+            closeCallForm();
+            postTo(`calls/edit?${changes}`).then(() => poll());
+            return;
+        }
+        if (!callAt) return;
+        const at = callAt;
+        const crew = $('call-send').checked && !$('call-send-row').hidden ? chosenCrew() : [];
+        const params = new URLSearchParams({
+            x: at.x.toFixed(1), y: at.y.toFixed(1), title,
+            text: $('call-text').value.trim(), code: $('call-code').value.trim(), p: $('call-priority').value,
+        });
+        const headers = key ? { 'X-Livemap-Key': key } : {};
+        closeCallForm();
+        try {
+            const res = await fetch(`${base}calls/add?${params}`, { method: 'POST', headers });
+            const data = await res.json();
+            if (data && data.id) {
+                await Promise.all(crew.map((member) =>
+                    fetch(`${base}calls/assign?id=${data.id}&unit=${member.data.id}`, { method: 'POST', headers }).catch(() => {})));
+            }
+        } catch (err) { /* the call was not created */ }
+        poll();
+    });
+
+    // ---- vehicle icons: seen from above, nose up; they take the unit's colour ----
+    const svg = (shapes) => `<svg viewBox="0 0 32 32" aria-hidden="true">${shapes}</svg>`;
+    const body = 'fill="currentColor" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"';
+    const glass = 'fill="#10141b" opacity=".7"';
+    const VEHICLE_ICONS = {
+        car: svg(`<rect x="9.5" y="3.5" width="13" height="25" rx="5.5" ${body}/>`
+            + `<path d="M11.8 12.6Q16 9.6 20.2 12.6L19.3 16.2H12.7Z" ${glass}/>`
+            + `<rect x="12.6" y="21.6" width="6.8" height="3" rx="1" ${glass}/>`),
+        bike: svg(`<rect x="14.4" y="2.5" width="3.2" height="8" rx="1.6" fill="#fff"/>`
+            + `<rect x="14.4" y="21.5" width="3.2" height="8" rx="1.6" fill="#fff"/>`
+            + `<path d="M9.5 10.5H22.5" stroke="#fff" stroke-width="2" stroke-linecap="round"/>`
+            + `<ellipse cx="16" cy="16.5" rx="4" ry="7.5" ${body}/>`),
+        heli: svg(`<circle cx="16" cy="13" r="11.5" fill="none" stroke="#fff" stroke-width="1.4" opacity=".55"/>`
+            + `<path d="M16 5C19.6 5 21 8.6 21 12.4C21 16 19.4 18.4 17.4 19.4L17 27.5H20V29.5H12V27.5H15L14.6 19.4C12.6 18.4 11 16 11 12.4C11 8.6 12.4 5 16 5Z" ${body}/>`
+            + `<path d="M7.5 4.5L24.5 21.5M24.5 4.5L7.5 21.5" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>`),
+        plane: svg(`<path d="M16 2C17.4 2 18.1 4 18.1 7V12L29.5 18.5V21.5L18.1 18.4V24L21.6 27V29.2L16 27.6L10.4 29.2V27L13.9 24V18.4L2.5 21.5V18.5L13.9 12V7C13.9 4 14.6 2 16 2Z" ${body}/>`),
+        boat: svg(`<path d="M16 2.5C20 7.5 22.2 12.5 22.2 18V27Q16 30 9.8 27V18C9.8 12.5 12 7.5 16 2.5Z" ${body}/>`
+            + `<rect x="12.6" y="16" width="6.8" height="7.5" rx="1.6" ${glass}/>`),
+    };
+
+    // ---- dispatcher duty: several consoles can be on duty together; with nobody on duty new calls go to the units ----
+    const duty = { id: Math.random().toString(36).slice(2, 12) || 'console', on: false, name: '' };
+    try { duty.name = localStorage.getItem('livemap-dispatcher') || ''; } catch (e) { /* no stored name */ }
+    $('duty-name').value = duty.name;
+
+    // ---- first-time setup: no account exists yet, the code from the server console creates the first admin ----
+    function showSetup() {
+        $('login').hidden = true;
+        $('setup').hidden = false;
+        if ($('setup-done').hidden) $('setup-code').focus();
+    }
+
+    function copyFrom(id, button) {
+        const ok = copyText($(id).textContent);
+        button.textContent = ok ? 'Copied' : 'Select it and copy by hand';
+        setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+    }
+
+    $('setup-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const params = new URLSearchParams({ user: $('setup-user').value.trim(), code: $('setup-code').value.trim() });
+        $('setup-error').textContent = '';
+        try {
+            const res = await fetch(`${base}setup?${params}`, { method: 'POST' });
+            const data = await res.json().catch(() => ({}));
+            if (res.ok && data.password) {
+                $('setup-name').textContent = data.user;
+                $('setup-password').textContent = data.password;
+                $('setup-form').hidden = true;
+                $('setup-done').hidden = false;
+            } else if (res.status === 409) {
+                $('setup').hidden = true;                // somebody else finished the setup: go to the login
+                poll();
+            } else {
+                $('setup-error').textContent = res.status === 429 ? 'Too many wrong tries. Wait a while and try again.'
+                    : data.error === 'code' ? 'That is not the setup code. It is printed in the server console and changes on every restart.'
+                    : 'Use 1 to 24 letters, numbers, spaces, dots or dashes for the username.';
+            }
+        } catch (err) {
+            $('setup-error').textContent = 'The server did not answer.';
+        }
+    });
+    $('setup-copy').onclick = (e) => copyFrom('setup-password', e.currentTarget);
+    $('setup-continue').onclick = () => {
+        $('username').value = $('setup-name').textContent;
+        $('setup-password').textContent = '';
+        $('setup').hidden = true;
+        showLogin('');
+    };
+
+    // ---- Accounts window (admins): add dispatchers, give a new password, admin on/off, delete ----
+    async function loadAccounts() {
+        if ($('accounts').hidden) return;
+        try {
+            const res = await fetch(base + 'accounts', { headers: key ? { 'X-Livemap-Key': key } : {}, cache: 'no-store' });
+            if (!res.ok) return;
+            const data = await res.json();
+            const list = $('accounts-list');
+            list.textContent = '';
+            (Array.isArray(data.accounts) ? data.accounts : []).forEach((account) => {
+                const mine = !!me && me.user === account.user;
+                const li = document.createElement('li');
+                const who = document.createElement('span');
+                who.className = 'who';
+                who.textContent = account.user;
+                if (mine) {
+                    const you = document.createElement('span');
+                    you.className = 'you';
+                    you.textContent = ' (you)';
+                    who.appendChild(you);
+                }
+                li.appendChild(who);
+                if (account.admin) {
+                    const tag = document.createElement('span');
+                    tag.className = 'tag';
+                    tag.textContent = 'admin';
+                    li.appendChild(tag);
+                }
+                const action = (text, path, danger) => {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.textContent = text;
+                    if (danger) button.className = 'danger';
+                    button.addEventListener('click', () => accountAction(path, account.user));
+                    li.appendChild(button);
+                };
+                action('New password', 'reset');
+                action(account.admin ? 'Remove admin' : 'Make admin', `admin&admin=${account.admin ? 0 : 1}`);
+                if (!mine) action('Delete', 'remove', true);
+                list.appendChild(li);
+            });
+        } catch (e) { /* keep what is shown */ }
+    }
+
+    function showSecret(user, password) {
+        $('account-secret-name').textContent = user;
+        $('account-secret-password').textContent = password;
+        $('account-secret').hidden = false;
+    }
+
+    const ACCOUNT_ERRORS = {
+        'exists': 'That username is already taken.',
+        'name': 'Use 1 to 24 letters, numbers, spaces, dots or dashes.',
+        'full': 'There are too many accounts.',
+        'last-admin': 'This is the last admin account, so it has to stay one.',
+        'self': 'You cannot delete the account you are logged in with.',
+    };
+
+    async function accountAction(action, user) {
+        const [name, extra] = action.split('&');
+        $('account-error').textContent = '';
+        try {
+            const res = await postTo(`accounts/${name}?user=${encodeURIComponent(user)}${extra ? '&' + extra : ''}`);
+            const data = await res.json().catch(() => ({}));
+            if (data.password) showSecret(data.user, data.password);
+            else if (!res.ok) $('account-error').textContent = ACCOUNT_ERRORS[data.error] || 'That did not work.';
+        } catch (e) { $('account-error').textContent = 'The server did not answer.'; }
+        loadAccounts();
+    }
+
+    function toggleAccounts(open) {
+        if (open) { toggleTemplates(false); toggleHistory(false); }
+        $('accounts').hidden = !open;
+        $('accounts-open').setAttribute('aria-pressed', String(open));
+        if (open) loadAccounts();
+        else { $('account-secret').hidden = true; $('account-secret-password').textContent = ''; $('account-error').textContent = ''; }
+    }
+
+    $('accounts-open').onclick = () => toggleAccounts($('accounts').hidden);
+    $('accounts-close').onclick = () => toggleAccounts(false);
+    $('account-secret-copy').onclick = (e) => copyFrom('account-secret-password', e.currentTarget);
+    $('account-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const user = $('account-user').value.trim();
+        if (!user) return;
+        accountAction(`add&admin=${$('account-admin').checked ? 1 : 0}`, user).then(() => {
+            if (!$('account-error').textContent) { $('account-user').value = ''; $('account-admin').checked = false; }
+        });
+    });
+
+    // ---- the logged-in account: its name is the dispatcher's name, admin decides about settings and templates ----
+    let me = null;
+
+    function setMe(next) {
+        me = next;
+        const limited = !!me && !me.admin;
+        document.body.classList.toggle('not-admin', limited);
+        $('self-mode').disabled = limited;
+        $('accounts-open').hidden = !(me && me.admin);
+        if (!(me && me.admin) && !$('accounts').hidden) toggleAccounts(false);
+        $('account').hidden = !me;
+        $('duty-name').hidden = !!me;
+        if (me) {
+            $('account-name').textContent = me.user + (me.admin ? ' (admin)' : '');
+            duty.name = me.user;
+        }
+    }
+
+    $('logout').onclick = () => {
+        const headers = key ? { 'X-Livemap-Key': key } : {};
+        if (duty.on) {
+            duty.on = false;
+            fetch(base + 'players' + dutyQuery(), { headers, keepalive: true }).catch(() => {});
+        }
+        fetch(base + 'logout', { headers, keepalive: true }).catch(() => {});
+        if (radio.joined) radioLeave();
+        key = '';
+        keyIsToken = false;
+        try { sessionStorage.removeItem(KEY_NAME); } catch (e) { /* ignore */ }
+        setMe(null);
+        updateDuty([]);
+        toggleAccounts(false);
+        showLogin('');
+    };
+
+    function dutyQuery() {
+        return `?d=${duty.id}&duty=${duty.on ? 1 : 0}` + (duty.on ? `&name=${encodeURIComponent(duty.name)}` : '');
+    }
+
+    // who sends units: 'auto', 'always' or 'never'. Any dispatcher can change it; everybody sees the change.
+    let selfMode = cfg.selfDispatch || 'auto';
+    $('self-mode').addEventListener('change', () => {
+        selfMode = $('self-mode').value;
+        postTo(`settings/mode?m=${selfMode}`).then(() => poll());
+    });
+
+    function updateDuty(names) {
+        if (document.activeElement !== $('self-mode')) $('self-mode').value = selfMode;
+        $('duty-box').classList.toggle('on', duty.on);
+        $('duty-name').disabled = duty.on;
+        $('duty-toggle').textContent = duty.on ? 'Go off duty' : 'Go on duty';
+        const others = names.slice();
+        if (duty.on) { const mine = others.indexOf(duty.name); if (mine !== -1) others.splice(mine, 1); }
+        let text;
+        if (others.length) text = `${duty.on ? 'Also on duty' : 'On duty'}: ${others.join(', ')}`;
+        else if (duty.on) text = 'You are the only dispatcher on duty.';
+        else if (selfMode === 'never') text = 'No dispatcher on duty: calls wait until somebody is.';
+        else text = 'No dispatcher on duty: new calls go straight to the units.';
+        $('duty-info').textContent = text;
+    }
+
+    $('duty').addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (!duty.on) {
+            duty.name = me ? me.user : ($('duty-name').value.trim() || 'Dispatcher');
+            $('duty-name').value = duty.name;
+            try { localStorage.setItem('livemap-dispatcher', duty.name); } catch (err) { /* not remembered */ }
+        }
+        duty.on = !duty.on;
+        updateDuty([]);
+        poll();
+    });
+
+    // closing the console ends the shift right away instead of after the timeout
+    window.addEventListener('pagehide', () => {
+        if (!duty.on) return;
+        duty.on = false;
+        fetch(base + 'players' + dutyQuery(), { headers: key ? { 'X-Livemap-Key': key } : {}, keepalive: true }).catch(() => {});
+    });
+
+    // ---- history: who did what and when, kept by the server ----
+    let historyEntries = [], historyTimer = null;
+
+    function renderHistory() {
+        const q = $('history-filter').value.trim().toLowerCase();
+        const list = $('history-list');
+        list.textContent = '';
+        const shown = historyEntries.filter((entry) => !q || String(entry.text).toLowerCase().includes(q));
+        shown.forEach((entry) => {
+            const li = document.createElement('li'), when = document.createElement('time');
+            when.textContent = new Date(entry.t * 1000).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+            li.append(when, String(entry.text));
+            list.appendChild(li);
+        });
+        if (!shown.length) {
+            const none = document.createElement('li');
+            none.className = 'none';
+            none.textContent = historyEntries.length ? 'Nothing matches that filter.' : 'Nothing has happened yet.';
+            list.appendChild(none);
+        }
+    }
+
+    async function loadHistory() {
+        clearTimeout(historyTimer);
+        if ($('history').hidden) return;
+        try {
+            const res = await fetch(base + 'history', { headers: key ? { 'X-Livemap-Key': key } : {}, cache: 'no-store' });
+            if (res.ok) {
+                const data = await res.json();
+                historyEntries = Array.isArray(data.entries) ? data.entries : [];
+                renderHistory();
+            }
+        } catch (e) { /* keep what is shown */ }
+        historyTimer = setTimeout(loadHistory, 5000);
+    }
+
+    function toggleHistory(open) {
+        if (open && !$('templates').hidden) toggleTemplates(false);
+        if (open && !$('accounts').hidden) toggleAccounts(false);
+        $('history').hidden = !open;
+        $('history-open').setAttribute('aria-pressed', String(open));
+        if (open) loadHistory(); else clearTimeout(historyTimer);
+    }
+
+    $('history-open').onclick = () => toggleHistory($('history').hidden);
+    $('history-close').onclick = () => toggleHistory(false);
+    $('history-filter').addEventListener('input', renderHistory);
+
+    // ---- right-click menu: on the map, on a unit, on a call ----
+    const menu = $('menu');
+
+    function closeMenu() { menu.hidden = true; }
+
+    // items: [text, action, 'danger'?], or '-' for a line; empty entries are skipped
+    function openMenu(x, y, title, items) {
+        menu.textContent = '';
+        const head = document.createElement('div');
+        head.className = 'head';
+        head.textContent = title;
+        menu.appendChild(head);
+        items.filter(Boolean).forEach((item) => {
+            if (item === '-') { menu.appendChild(document.createElement('hr')); return; }
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('role', 'menuitem');
+            button.textContent = item[0];
+            if (item[2]) button.className = item[2];
+            button.addEventListener('click', () => { closeMenu(); item[1](); });
+            menu.appendChild(button);
+        });
+        menu.hidden = false;
+        menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+        menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
+    }
+
+    function postTo(path) {
+        return fetch(base + path, { method: 'POST', headers: key ? { 'X-Livemap-Key': key } : {} }).catch(() => {});
+    }
+
+    function assignCrew(callId, crew) {
+        Promise.all(crew.map((member) => postTo(`calls/assign?id=${callId}&unit=${member.data.id}`))).then(() => poll());
+    }
+
+    function releaseCrew(crew) {
+        Promise.all(crew.map((member) => postTo(`calls/unassign?unit=${member.data.id}`))).then(() => poll());
+    }
+
+    // available / busy / break for a unit and its crew; any logged-in dispatcher may set it
+    function setUnitStatus(crew, status) {
+        postTo(`units/status?units=${crew.map((member) => member.data.id).join(',')}&st=${status}`).then(() => poll());
+    }
+
+    // a call with no form: just a place to go to, with the crew sent straight away
+    async function sendHere(point, crew) {
+        const params = new URLSearchParams({ x: point.x.toFixed(1), y: point.y.toFixed(1), title: 'Go to location' });
+        try {
+            const res = await postTo(`calls/add?${params}`);
+            const data = await res.json();
+            if (data && data.id) return assignCrew(data.id, crew);
+        } catch (e) { /* nothing was created */ }
+        poll();
+    }
+
+    // right-click on a unit, on the map or in the unit list
+    function openUnitMenu(x, y, id) {
+        const unit = players.get(id);
+        if (!unit) return;
+        const crew = crewOf(id);
+        const open = [...calls.values()].slice(-6).reverse();
+        const busy = crew.some((member) => member.data.call);
+        openMenu(x, y, unitName(crew), [
+            ['Select, set call sign', () => { picked.clear(); select(null, true); select(id); showUnit(); $('unit-cs').focus(); }],
+            open.length && '-',
+            ...open.map((call) => [`Send to: ${call.data.title}`, () => assignCrew(call.data.id, crew)]),
+            busy && ['Take off the call', () => releaseCrew(crew), 'danger'],
+            '-',
+            ['Status: available', () => setUnitStatus(crew, 'available')],
+            ['Status: busy', () => setUnitStatus(crew, 'busy')],
+            ['Status: unavailable (break)', () => setUnitStatus(crew, 'break')],
+        ]);
+    }
+
+    view.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (calibrating) return;
+        const x = e.clientX, y = e.clientY;
+        const chosen = chosenCrew();
+        const callEl = e.target.closest('.call'), unitEl = e.target.closest('.marker');
+
+        if (callEl) {
+            const call = [...calls.values()].find((entry) => entry.el === callEl);
+            if (!call) return;
+            return openMenu(x, y, call.data.title, [
+                chosen.length && [`Send ${unitName(chosen)}`, () => assignCrew(call.data.id, chosen)],
+                ['Edit details', () => editCall(call.data.id)],
+                ['Move call (then click the new place)', () => moveCall(call.data.id)],
+                [armedCall === call.data.id ? 'Stop sending units' : 'Send units by clicking them', () => focusCall(call.data.id)],
+                ['Center on this call', () => centerCall(call.data.id)],
+                '-',
+                ['Close call', () => closeCall(call.data.id), 'danger'],
+            ]);
+        }
+
+        if (unitEl) {
+            const unit = [...players.values()].find((entry) => entry.el === unitEl);
+            if (unit) openUnitMenu(x, y, unit.data.id);
+            return;
+        }
+
+        const point = gameAt(x, y);
+        openMenu(x, y, `X ${fmt(point.x)}  Y ${fmt(point.y)}`, [
+            ['New call here', () => openCallForm(x, y)],
+            chosen.length && [`Send ${unitName(chosen)} here`, () => sendHere(point, chosen)],
+            templates.length && '-',
+            ...templates.slice(0, 10).map((tpl) => [
+                `P${tpl.priority || 2} · ${tpl.title}` + (chosen.length ? ` + send ${unitName(chosen)}` : ''),
+                () => quickCall(point, tpl, chosen),
+            ]),
+            '-',
+            ['Copy coordinates', () => copyCoords(x, y)],
+        ]);
+    });
+
+    // a click outside only closes the menu, it does not also act on the map underneath
+    window.addEventListener('pointerdown', (e) => {
+        if (menu.hidden || menu.contains(e.target)) return;
+        closeMenu();
+        e.stopPropagation();
+    }, true);
+    window.addEventListener('wheel', closeMenu, { passive: true });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+    window.addEventListener('blur', closeMenu);
+
+    // ---- cars and call signs ----
+    // Players in the same car are one marker. A call sign is given to the whole crew at once
+    // and stays with those players when they get out or change cars.
+    let carsOnly = false, unitShown = null;
+
+    function crewOf(id) {
+        const me = players.get(id);
+        if (!me) return [];
+        if (!me.data.veh) return [me];
+        return [...players.values()].filter((entry) => entry.data.veh === me.data.veh);
+    }
+
+    function groupVehicles() {
+        const cars = new Map();
+        players.forEach((entry) => {
+            if (!entry.data.veh) return;
+            if (!cars.has(entry.data.veh)) cars.set(entry.data.veh, []);
+            cars.get(entry.data.veh).push(entry);
+        });
+
+        players.forEach((entry) => {
+            const crew = entry.data.veh ? cars.get(entry.data.veh) : [entry];
+            const lead = crew.find((member) => member.data.drv) || crew[0];
+            entry.el.hidden = lead !== entry;      // passengers ride on the driver's marker
+            if (lead !== entry) return;
+
+            const signs = [...new Set(crew.map((member) => member.data.cs).filter(Boolean))];
+            const names = crew.map((member) => label(member.data)).join(', ');
+            let text = names;
+            if (signs.length) text = crew.length > 1 ? `${signs.join(' / ')} (${crew.length})` : `${signs[0]} · ${names}`;
+            entry.el.querySelector('.name').textContent = text;
+            entry.el.querySelector('.dot').title = crew.map((member) => label(member.data) + (member.data.gr ? ` (${member.data.gr})` : '')).join(', ');
+            entry.el.classList.toggle('signed', signs.length > 0);
+            entry.el.classList.toggle('away', crew.some((member) => member.data.st === 'break'));
+            entry.el.classList.toggle('selected', crew.some((member) => isChosen(member.data.id)));
+        });
+    }
+
+    // ---- unit list: one row per unit (a car with its crew, or one player on foot), grouped by status ----
+    function renderList() {
+        const list = $('list');
+        const q = filter.trim().toLowerCase();
+        players.forEach((entry) => entry.el.classList.remove('hot'));     // the rows are rebuilt below
+
+        const units = [], byCar = new Map();
+        players.forEach((entry) => {
+            if (!entry.data.veh) { units.push({ crew: [entry] }); return; }
+            let unit = byCar.get(entry.data.veh);
+            if (!unit) { unit = { crew: [] }; byCar.set(entry.data.veh, unit); units.push(unit); }
+            unit.crew.push(entry);
+        });
+        units.forEach((unit) => {
+            const signed = unit.crew.find((member) => member.data.cs);
+            const busy = unit.crew.filter((member) => member.data.call);
+            unit.lead = unit.crew.find((member) => member.data.drv) || unit.crew[0];
+            unit.sign = signed ? signed.data.cs : '';
+            unit.names = unit.crew.map((member) => label(member.data)).join(', ');
+            unit.car = !!unit.lead.data.v;
+            unit.status = !busy.length ? 'free' : (busy.every((member) => member.data.sc) ? 'scene' : 'route');
+            if (unit.status === 'free') {            // what the unit (or the dispatcher) set itself
+                if (unit.crew.some((member) => member.data.st === 'break')) unit.status = 'break';
+                else if (unit.crew.some((member) => member.data.st === 'busy')) unit.status = 'busy';
+            }
+            unit.key = (unit.sign ? '0' + unit.sign : '1') + unit.names;
+        });
+
+        const free = units.filter((unit) => unit.status === 'free').length;
+        $('count').textContent = units.length
+            ? `${units.length} ${units.length === 1 ? 'unit' : 'units'} · ${free} free`
+            : 'No units';
+
+        const shown = units
+            .filter((unit) => !carsOnly || unit.car)
+            .filter((unit) => !q || `${unit.sign} ${unit.names} ${unit.lead.data.job || ''}`.toLowerCase().includes(q)
+                || unit.crew.some((member) => String(member.data.id) === q));
+
+        list.textContent = '';
+        [['free', 'Free'], ['route', 'En route'], ['scene', 'On scene'], ['busy', 'Busy'], ['break', 'Unavailable']].forEach(([status, title]) => {
+            const group = shown.filter((unit) => unit.status === status).sort((a, b) => a.key.localeCompare(b.key));
+            if (!group.length) return;
+
+            const head = document.createElement('li');
+            head.className = 'group is-' + status;
+            head.textContent = `${title} · ${group.length}`;
+            list.appendChild(head);
+
+            group.forEach((unit) => {
+                const li = document.createElement('li'), row = document.createElement('button');
+                row.type = 'button';
+                if (unit.car) row.classList.add('vehicle');
+                if (unit.crew.some((member) => isChosen(member.data.id))) row.classList.add('selected');
+
+                const glyph = document.createElement('span');
+                glyph.className = 'glyph';
+                glyph.style.background = unit.lead.data.c || '';
+                const main = document.createElement('span');
+                main.className = 'main';
+                const who = document.createElement('span');
+                who.className = 'who';
+                if (unit.sign) {
+                    const sign = document.createElement('span');
+                    sign.className = 'cs';
+                    sign.textContent = unit.sign;
+                    who.append(sign, ' ');
+                }
+                who.append(unit.names);
+                const sub = document.createElement('span');
+                sub.className = 'sub';
+                const place = unit.car ? (unit.crew.length > 1 ? `${unit.crew.length} in a vehicle` : 'In a vehicle') : 'On foot';
+                // rank: next to the job for one player; for a crew it is in the tooltip with each name
+                const rank = unit.crew.length === 1 ? unit.lead.data.gr : '';
+                sub.textContent = [unit.lead.data.job, rank, place].filter(Boolean).join(' · ');
+                row.title = unit.crew.map((member) => label(member.data) + (member.data.gr ? ` (${member.data.gr})` : '')).join(', ');
+                main.append(who, sub);
+
+                row.append(glyph, main);
+                row.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    openUnitMenu(e.clientX, e.clientY, unit.lead.data.id);
+                });
+                row.addEventListener('mouseenter', () => unit.lead.el.classList.add('hot'));
+                row.addEventListener('mouseleave', () => unit.lead.el.classList.remove('hot'));
+                row.addEventListener('click', (e) => {
+                    clickUnit(unit.lead.data.id, e, false);
+                    if (window.innerWidth <= 700 && !picked.size) $('panel').classList.add('closed');
+                });
+                li.appendChild(row);
+                list.appendChild(li);
+            });
+        });
+
+        if (shown.length === 0) {
+            const empty = document.createElement('li');
+            empty.id = 'empty';
+            empty.textContent = units.length === 0 ? 'No units on the map right now.' : 'No unit matches that search.';
+            list.appendChild(empty);
+        }
+    }
+
+    // ---- selection: one unit by clicking, several with Ctrl+click or Shift+drag ----
+    const picked = new Set();            // player ids chosen on top of `selected`
+
+    const isChosen = (id) => id === selected || picked.has(id);
+    const unitCount = (crew) => new Set(crew.map((member) => (member.data.veh ? 'v' + member.data.veh : 'p' + member.data.id))).size;
+
+    // everybody who is chosen, whole crews included
+    function chosenCrew() {
+        const out = new Map();
+        crewOf(selected).forEach((member) => out.set(member.data.id, member));
+        picked.forEach((id) => crewOf(id).forEach((member) => out.set(member.data.id, member)));
+        return [...out.values()];
+    }
+
+    function clearPicked() {
+        picked.clear();
+        showUnit();
+    }
+
+    // Ctrl / Shift + click adds or removes a unit; a plain click chooses just that one
+    function clickUnit(id, e, toggle) {
+        // sending mode: the click sends this unit (with its crew) to the chosen call, or takes it off again
+        if (armedCall !== null) {
+            const crew = crewOf(id);
+            if (!crew.length) return;
+            if (crew.every((member) => member.data.call === armedCall)) releaseCrew(crew);
+            else assignCrew(armedCall, crew);
+            return;
+        }
+        if (e.ctrlKey || e.metaKey || e.shiftKey) {
+            if (selected !== null) { picked.add(selected); select(null, true); }
+            const ids = crewOf(id).map((member) => member.data.id);
+            const on = ids.some((one) => picked.has(one));
+            ids.forEach((one) => (on ? picked.delete(one) : picked.add(one)));
+            showUnit();
+            return;
+        }
+        picked.clear();
+        select(toggle && selected === id ? null : id);
+        showUnit();
+    }
+
+    // Shift + drag on the map draws a box; every unit inside is added
+    let boxFrom = null;
+    const boxEl = $('select-box');
+
+    function drawBox(e) {
+        boxEl.style.left = Math.min(boxFrom.x, e.clientX) + 'px';
+        boxEl.style.top = Math.min(boxFrom.y, e.clientY) + 'px';
+        boxEl.style.width = Math.abs(e.clientX - boxFrom.x) + 'px';
+        boxEl.style.height = Math.abs(e.clientY - boxFrom.y) + 'px';
+    }
+
+    window.addEventListener('pointerdown', (e) => {
+        if (!e.shiftKey || e.button !== 0 || calibrating || !view.contains(e.target) || e.target.closest('.dot, .call-pin')) return;
+        e.stopPropagation();
+        e.preventDefault();
+        boxFrom = { x: e.clientX, y: e.clientY };
+        drawBox(e);
+        boxEl.hidden = false;
+    }, true);
+    window.addEventListener('pointermove', (e) => { if (boxFrom) drawBox(e); });
+    window.addEventListener('pointerup', (e) => {
+        if (!boxFrom) return;
+        const left = Math.min(boxFrom.x, e.clientX), right = Math.max(boxFrom.x, e.clientX);
+        const top = Math.min(boxFrom.y, e.clientY), bottom = Math.max(boxFrom.y, e.clientY);
+        boxFrom = null;
+        boxEl.hidden = true;
+        if (right - left < 4 && bottom - top < 4) return;
+        if (selected !== null) { picked.add(selected); select(null, true); }
+        players.forEach((entry) => {
+            if (carsOnly && !entry.data.v) return;
+            const m = toMap(entry.data.x, entry.data.y);
+            const x = m.x * cam.k + cam.x, y = m.y * cam.k + cam.y;
+            if (x >= left && x <= right && y >= top && y <= bottom) picked.add(entry.data.id);
+        });
+        showUnit();
+    });
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && picked.size && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) clearPicked();
+    });
+
+    // the box under the search field: call sign for one unit, or a summary of several
+    function showUnit() {
+        picked.forEach((id) => { if (!players.has(id)) picked.delete(id); });
+        groupVehicles();
+        const crew = chosenCrew();
+        const count = unitCount(crew);
+        $('unit').hidden = crew.length === 0;
+        $('unit').classList.toggle('many', count > 1);
+        if (!crew.length) { unitShown = null; renderList(); return; }
+
+        const names = crew.map((member) => label(member.data)).join(', ');
+        if (count > 1) {
+            $('unit-who').textContent = `${count} units selected: ${names}. Press Send on a call, or right-click the map.`;
+        } else {
+            $('unit-who').textContent = crew.length > 1 ? `Call sign for this car: ${names}` : `Call sign for ${names}`;
+        }
+        const shown = crew.map((member) => member.data.id).join(',');
+        if (unitShown !== shown) {                 // do not overwrite what is being typed
+            unitShown = shown;
+            $('unit-cs').value = (crew.find((member) => member.data.cs) || crew[0]).data.cs || '';
+        }
+        renderList();
+    }
+
+    $('unit-clear').onclick = () => { picked.clear(); select(null, true); showUnit(); };
+
+    $('unit').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const crew = chosenCrew();
+        if (!crew.length || unitCount(crew) > 1) return;
+        const ids = crew.map((member) => member.data.id).join(',');
+        fetch(`${base}units/callsign?units=${ids}&cs=${encodeURIComponent($('unit-cs').value.trim())}`,
+            { method: 'POST', headers: key ? { 'X-Livemap-Key': key } : {} })
+            .then((res) => {
+                if (res.status === 400) $('unit-who').textContent = 'Use only letters, numbers, spaces, dots and dashes (12 at most).';
+                else { $('unit-cs').blur(); poll(); }
+            })
+            .catch(() => {});
+    });
+
+    // Auto focus: clicking a unit or a call moves the map to it, and a chosen unit is followed.
+    // Switched off, the map only moves when you move it (or use "Center on this call").
+    let autoFocus = true;
+
+    function setAutoFocus(on) {
+        autoFocus = on;
+        $('autofocus').setAttribute('aria-pressed', String(on));
+        try { localStorage.setItem('livemap-autofocus', on ? '1' : '0'); } catch (e) { /* not remembered */ }
+    }
+    $('autofocus').onclick = () => setAutoFocus(!autoFocus);
+    try { if (localStorage.getItem('livemap-autofocus') === '0') setAutoFocus(false); } catch (e) { /* storage unavailable */ }
+
+    function setCarsOnly(on) {
+        carsOnly = on;
+        document.body.classList.toggle('cars-only', on);
+        $('cars').setAttribute('aria-pressed', String(on));
+        try { localStorage.setItem('livemap-cars', on ? '1' : '0'); } catch (e) { /* not remembered */ }
+        renderList();
+    }
+    $('cars').onclick = () => setCarsOnly(!carsOnly);
+    try { if (localStorage.getItem('livemap-cars') === '1') setCarsOnly(true); } catch (e) { /* storage unavailable */ }
+
+    // ---- W A S D move the map (Shift = faster) ----
+    const PAN_KEYS = { KeyW: [0, 1], KeyS: [0, -1], KeyA: [1, 0], KeyD: [-1, 0] };
+    const held = new Set();
+    let panFrame = null, panLast = 0;
+
+    function panStep(now) {
+        panFrame = null;
+        if (!held.size) return;
+        const seconds = Math.min(0.05, (now - panLast) / 1000);
+        panLast = now;
+        let dx = 0, dy = 0;
+        held.forEach((code) => { dx += PAN_KEYS[code][0]; dy += PAN_KEYS[code][1]; });
+        if (dx || dy) {
+            const speed = (held.shift ? 1800 : 900) * seconds;
+            cam.x += dx * speed;
+            cam.y += dy * speed;
+            apply();
+        }
+        panFrame = requestAnimationFrame(panStep);
+    }
+
+    window.addEventListener('keydown', (e) => {
+        if (!PAN_KEYS[e.code] || e.ctrlKey || e.metaKey || e.altKey) return;
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;      // typing, not steering
+        e.preventDefault();
+        held.shift = e.shiftKey;
+        if (held.has(e.code)) return;
+        held.add(e.code);
+        if (selected !== null) { picked.add(selected); select(null, true); }   // stop following, keep the unit chosen
+        if (panFrame === null) { panLast = performance.now(); panFrame = requestAnimationFrame(panStep); }
+    });
+    window.addEventListener('keyup', (e) => { held.delete(e.code); held.shift = e.shiftKey; });
+    window.addEventListener('blur', () => held.clear());
+
+    // ---- job colours ----
+    if (Array.isArray(cfg.jobs) && cfg.jobs.length) {
+        document.body.classList.add('has-jobs');
+        $('jobs').hidden = false;
+        cfg.jobs.forEach((job) => {
+            const item = document.createElement('span'), dot = document.createElement('i');
+            dot.style.background = job.color;
+            item.append(dot, job.label);
+            $('jobs').appendChild(item);
+        });
+    }
+
+    // ---- data ----
+    function setStatus(text, ok) {
+        $('status').textContent = text;
+        $('status').classList.toggle('off', !ok);
+    }
+
+    function showLogin(message) {
+        clearTimeout(timer);
+        $('login').hidden = false;
+        $('login-error').textContent = message || '';
+        ($('username').value ? $('password') : $('username')).focus();
+    }
+
+    async function poll() {
+        clearTimeout(timer);
+        try {
+            const res = await fetch(base + 'players' + dutyQuery(), { headers: loginHeaders(), cache: 'no-store' });
+
+            if (res.status === 401) {
+                const info = await res.json().catch(() => ({}));
+                if (info.error === 'setup') { clearTimeout(timer); return showSetup(); }    // no account exists yet
+                const wrong = !!key && !keyIsToken;       // an old token just means: log in again
+                key = '';
+                try { sessionStorage.removeItem(KEY_NAME); } catch (e) { /* ignore */ }
+                return showLogin(wrong ? 'Wrong username or password.' : '');
+            }
+            if (res.status === 429) return showLogin('Too many wrong tries from your address. It is locked for a while, and longer each time.');
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+
+            const data = await res.json();
+            const token = (data.me && data.me.token) || res.headers.get('X-Livemap-Token');
+            if (token) {
+                key = token;
+                keyIsToken = true;
+                try { sessionStorage.setItem(KEY_NAME, key); } catch (e) { /* ignore */ }
+            }
+            setMe(data.me || null);
+            const list = Array.isArray(data.players) ? data.players : [];
+            $('login').hidden = true;
+            update(list);
+            updateCalls(Array.isArray(data.calls) ? data.calls : []);
+            if (data.mode) selfMode = data.mode;
+            if (Array.isArray(data.templates)) setTemplates(data.templates);
+            updateDuty(Array.isArray(data.dispatchers) ? data.dispatchers : []);
+            document.title = (calls.size ? `(${calls.size}) ` : '') + (cfg.title || 'Dispatch');
+            setStatus('Live', true);
+        } catch (e) {
+            setStatus('Server not responding', false);
+        }
+        timer = setTimeout(poll, interval);
+    }
+
+    $('login').querySelector('form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const name = $('username').value.trim();
+        key = $('password').value;
+        if (!key || !name) { key = ''; $('login-error').textContent = 'Type your username and your password.'; return; }
+        keyIsToken = false;
+        loginUser = name;
+        $('password').value = '';        // the password itself is never stored, only the session token
+        $('login-error').textContent = '';
+        poll();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { if (!duty.on) clearTimeout(timer); }   // a dispatcher on duty keeps reporting in
+        else if ($('login').hidden) poll();
+    });
+
+    // ---- radio: listen to and talk on a radio channel of the server's voice system ----
+    // Audio travels as short mu-law packets (12 kHz, 100 ms) through the same HTTP handler as the map.
+    const RATE = 12000, CHUNK = 1200;
+    const canTalk = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    const radio = {
+        id: Math.random().toString(36).slice(2, 12) || 'web',
+        ch: 0, joined: false, since: 0, timer: null, noteTimer: null,
+        ctx: null, out: null, fx: null, next: {}, abort: null,
+        mic: null, want: false, talking: false, pending: [], sending: false,
+    };
+
+    function muEncode(s) {
+        s = Math.max(-1, Math.min(1, s));
+        const sign = s < 0 ? 0x80 : 0;
+        const v = Math.min(32635, Math.round(Math.abs(s) * 32767)) + 132;
+        let exp = 7;
+        for (let mask = 0x4000; (v & mask) === 0 && exp > 0; mask >>= 1) exp--;
+        return ~(sign | (exp << 4) | ((v >> (exp + 3)) & 0x0f)) & 0xff;
+    }
+
+    function muDecode(b) {
+        b = ~b & 0xff;
+        const v = ((((b & 0x0f) << 3) + 132) << ((b >> 4) & 7)) - 132;
+        return (b & 0x80 ? -v : v) / 32768;
+    }
+
+    // averages the microphone down to RATE and hands out mu-law packets
+    function downsampler(inRate, onChunk) {
+        const step = inRate / RATE;
+        let pos = 0, sum = 0, n = 0, out = new Uint8Array(CHUNK), fill = 0;
+        return {
+            push(input) {
+                for (let i = 0; i < input.length; i++) {
+                    sum += input[i]; n++; pos++;
+                    if (pos >= step) {
+                        pos -= step;
+                        out[fill++] = muEncode(sum / n);
+                        sum = 0; n = 0;
+                        if (fill === CHUNK) { onChunk(out); out = new Uint8Array(CHUNK); fill = 0; }
+                    }
+                }
+            },
+            flush() {
+                if (fill > 0) onChunk(out.slice(0, fill));
+                out = new Uint8Array(CHUNK); fill = 0; pos = 0; sum = 0; n = 0;
+            },
+        };
+    }
+
+    function radioNote(text, kind) {
+        const note = $('radio-note');
+        note.textContent = text;
+        note.className = kind || '';
+    }
+
+    function radioIdle() {
+        if (!radio.joined || radio.talking) return;
+        radioNote(canTalk ? `Listening on channel ${radio.ch}.`
+                          : `Listening on channel ${radio.ch}. To talk, open the console over HTTPS (or on localhost).`);
+    }
+
+    // radio sound: narrow band, a little grit, static while somebody talks, squelch clicks
+    function radioSound(ctx, dest) {
+        const noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+        const samples = noise.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
+
+        const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 620;
+        const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2600;
+        const mid = ctx.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 1500; mid.Q.value = 1.4; mid.gain.value = 10;
+        const drive = ctx.createWaveShaper();
+        const curve = new Float32Array(1024);
+        for (let i = 0; i < curve.length; i++) {
+            const x = i / (curve.length - 1) * 2 - 1;
+            curve[i] = Math.tanh(4 * x) / Math.tanh(4);
+        }
+        drive.curve = curve;
+        // boost before the soft clipper: quiet voices come up, loud ones are held at the ceiling
+        const boost = ctx.createGain(); boost.gain.value = 3.2;
+        const level = ctx.createGain(); level.gain.value = 0.5;
+        // each filter twice for steep edges, then hard compression, then the small-speaker roll-off
+        const hp2 = ctx.createBiquadFilter(); hp2.type = 'highpass'; hp2.frequency.value = 620;
+        const lp2 = ctx.createBiquadFilter(); lp2.type = 'lowpass'; lp2.frequency.value = 2600;
+        const speaker = ctx.createBiquadFilter(); speaker.type = 'lowpass'; speaker.frequency.value = 3000;
+        hp.connect(hp2); hp2.connect(lp); lp.connect(lp2); lp2.connect(mid); mid.connect(boost);
+        boost.connect(drive); drive.connect(speaker); speaker.connect(level); level.connect(dest);
+
+        const band = ctx.createBiquadFilter(); band.type = 'bandpass'; band.frequency.value = 2200; band.Q.value = 0.7;
+        band.connect(dest);
+
+        let hiss = null, until = 0, timer = null;
+
+        function burst(at, length, volume) {
+            const src = ctx.createBufferSource(), gain = ctx.createGain();
+            src.buffer = noise;
+            gain.gain.setValueAtTime(volume, at);
+            gain.gain.exponentialRampToValueAtTime(0.001, at + length);
+            src.connect(gain); gain.connect(band);
+            src.start(at, Math.random() * 0.5);
+            src.stop(at + length);
+        }
+
+        function finish() {
+            if (ctx.currentTime < until + 0.2) { timer = setTimeout(finish, 60); return; }
+            hiss.stop();
+            hiss = null;
+            burst(ctx.currentTime, 0.12, 0.12);          // squelch tail when the transmission ends
+        }
+
+        return {
+            input: hp,
+            // call for every packet with the times it starts and ends
+            packet(start, end) {
+                if (!hiss) {
+                    const gain = ctx.createGain();
+                    gain.gain.value = 0.007;
+                    hiss = ctx.createBufferSource();
+                    hiss.buffer = noise; hiss.loop = true;
+                    hiss.connect(gain); gain.connect(band);
+                    hiss.start(start);
+                    burst(start, 0.04, 0.1);             // click when somebody keys up
+                    until = 0;
+                }
+                until = Math.max(until, end);
+                clearTimeout(timer);
+                timer = setTimeout(finish, Math.max(0, (until - ctx.currentTime) * 1000) + 200);
+            },
+        };
+    }
+
+    // slider position 0-100 -> gain; squared so the lower half of the slider is useful
+    function radioVolume() {
+        const v = Number($('radio-vol').value) / 100;
+        return v * v * 2;
+    }
+
+    function radioAudio() {
+        if (!radio.ctx) {
+            radio.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            radio.master = radio.ctx.createGain();          // the Volume slider
+            radio.master.gain.value = radioVolume();
+            radio.master.connect(radio.ctx.destination);
+            radio.fx = cfg.voiceEffect === false ? null : radioSound(radio.ctx, radio.master);
+            radio.out = radio.fx ? radio.fx.input : radio.master;
+        }
+        if (radio.ctx.state === 'suspended') radio.ctx.resume();
+        return radio.ctx;
+    }
+
+    function radioPlay(chunk) {
+        const ctx = radio.ctx, bin = atob(chunk.d);
+        if (!bin.length) return;
+        const buf = ctx.createBuffer(1, bin.length, RATE), data = buf.getChannelData(0);
+        for (let i = 0; i < bin.length; i++) data[i] = muDecode(bin.charCodeAt(i));
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(radio.out);
+        let at = radio.next[chunk.f] || 0;
+        if (at < ctx.currentTime + 0.02) at = ctx.currentTime + 0.15;   // small buffer against stutter
+        src.start(at);
+        radio.next[chunk.f] = at + buf.duration;
+        if (radio.fx) radio.fx.packet(at, at + buf.duration);
+    }
+
+    // The server holds this request open until somebody talks, so audio arrives without a polling delay.
+    async function radioPoll() {
+        clearTimeout(radio.timer);
+        if (!radio.joined) return;
+        let wait = 1000;
+        radio.abort = new AbortController();
+        try {
+            const res = await fetch(`${base}voice/poll?ch=${encodeURIComponent(radio.ch)}&id=${radio.id}&since=${radio.since}`,
+                { headers: { 'X-Livemap-Key': key }, cache: 'no-store', signal: radio.abort.signal });
+            if (!radio.joined) return;
+
+            if (res.status === 401) { radioLeave(); return radioNote('Log in to the map again.', 'bad'); }
+            if (res.status === 403) { radioLeave(); return radioNote('That channel is not open to the map.', 'bad'); }
+            if (res.status === 404) { radioLeave(); return radioNote('The radio is switched off on the server.', 'bad'); }
+            if (res.status === 429) { radioLeave(); return radioNote('Too many listeners. Try again later.', 'bad'); }
+            if (res.status === 503) radioNote('No supported voice resource is running on the server.', 'bad');
+
+            if (res.ok) {
+                const data = await res.json();
+                radio.since = data.seq || 0;
+                const list = Array.isArray(data.chunks) ? data.chunks : [];
+                list.forEach((chunk) => { try { radioPlay(chunk); } catch (e) { /* skip a bad packet */ } });
+                if (list.length && !radio.talking) {
+                    radioNote(`${list[list.length - 1].n || 'Somebody'} is talking`, 'heard');
+                    clearTimeout(radio.noteTimer);
+                    radio.noteTimer = setTimeout(radioIdle, 900);
+                }
+                wait = list.length ? 0 : 50;
+            }
+        } catch (e) { /* the map status already shows connection problems */ }
+        if (radio.joined) radio.timer = setTimeout(radioPoll, wait);
+    }
+
+    function radioSend(bytes) {
+        radio.pending.push(bytes);
+        if (radio.pending.length > 20) radio.pending.shift();   // hopeless connection: drop the oldest audio
+        if (!radio.sending) radioFlush();
+    }
+
+    // one request at a time so packets stay in order; if the connection falls behind,
+    // everything that piled up goes out together
+    async function radioFlush() {
+        radio.sending = true;
+        const url = `${base}voice/talk?ch=${encodeURIComponent(radio.ch)}&id=${radio.id}`;
+        while (radio.pending.length) {
+            let count = 0, size = 0;
+            while (count < radio.pending.length && size + radio.pending[count].length <= 6000) size += radio.pending[count++].length;
+            const all = new Uint8Array(size);
+            let at = 0;
+            radio.pending.splice(0, count).forEach((part) => { all.set(part, at); at += part.length; });
+            try {
+                await fetch(url, { method: 'POST', headers: { 'X-Livemap-Key': key, 'Content-Type': 'text/plain' },
+                    body: btoa(String.fromCharCode.apply(null, all)) });
+            } catch (e) { /* that bit of audio is lost */ }
+        }
+        radio.sending = false;
+    }
+
+    // Hands microphone blocks to onBlock while active(true). Uses an AudioWorklet where the
+    // browser allows it and falls back to the older ScriptProcessor otherwise.
+    async function micTap(ctx, source, onBlock) {
+        const mute = ctx.createGain();
+        mute.gain.value = 0;
+        mute.connect(ctx.destination);
+
+        if (ctx.audioWorklet && window.AudioWorkletNode) {
+            try {
+                if (!ctx.micTapLoaded) {
+                    const code = 'registerProcessor("mic-tap", class extends AudioWorkletProcessor {'
+                        + ' constructor() { super(); this.on = false; this.port.onmessage = (e) => { this.on = !!e.data; }; }'
+                        + ' process(inputs) { const ch = inputs[0][0]; if (this.on && ch) this.port.postMessage(ch.slice(0)); return true; } });';
+                    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+                    await ctx.audioWorklet.addModule(url);
+                    URL.revokeObjectURL(url);
+                    ctx.micTapLoaded = true;
+                }
+                const node = new AudioWorkletNode(ctx, 'mic-tap');
+                node.port.onmessage = (e) => onBlock(e.data);
+                source.connect(node);
+                node.connect(mute);
+                return {
+                    kind: 'worklet',
+                    active(on) { node.port.postMessage(on); },
+                    stop() { node.port.onmessage = null; node.disconnect(); mute.disconnect(); },
+                };
+            } catch (e) { /* not available here: use the fallback below */ }
+        }
+
+        let on = false;
+        const node = ctx.createScriptProcessor(1024, 1, 1);
+        node.onaudioprocess = (e) => { if (on) onBlock(e.inputBuffer.getChannelData(0)); };
+        source.connect(node);
+        node.connect(mute);
+        return {
+            kind: 'script',
+            active(value) { on = value; },
+            stop() { node.onaudioprocess = null; node.disconnect(); mute.disconnect(); },
+        };
+    }
+
+    async function radioMic() {
+        if (radio.mic) return true;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+            const ctx = radioAudio();
+            const source = ctx.createMediaStreamSource(stream);
+            const down = downsampler(ctx.sampleRate, radioSend);
+            const tap = await micTap(ctx, source, (block) => { if (radio.talking) down.push(block); });
+            radio.mic = { stream, source, tap, down };
+            return true;
+        } catch (e) {
+            radioNote('The browser did not allow the microphone.', 'bad');
+            return false;
+        }
+    }
+
+    function radioCloseMic() {
+        if (!radio.mic) return;
+        radio.mic.tap.stop();
+        radio.mic.source.disconnect();
+        radio.mic.stream.getTracks().forEach((track) => track.stop());
+        radio.mic = null;
+    }
+
+    async function radioTalk(on) {
+        if (!on) {
+            radio.want = false;
+            if (!radio.talking) return;
+            radio.talking = false;
+            radio.mic.tap.active(false);
+            radio.mic.down.flush();
+            $('radio-talk').classList.remove('live');
+            $('radio-talk').textContent = 'Hold to talk (Space)';
+            radioIdle();
+            return;
+        }
+        if (!radio.joined || radio.talking || radio.want || !canTalk) return;
+        radio.want = true;
+        if (!(await radioMic())) { radio.want = false; return; }
+        if (!radio.want || !radio.joined) return;   // let go while the browser was still asking
+        radio.talking = true;
+        radio.mic.tap.active(true);
+        $('radio-talk').classList.add('live');
+        $('radio-talk').textContent = 'On air (Space)';
+        radioNote(`Talking on channel ${radio.ch}`);
+    }
+
+    function radioJoin() {
+        const ch = $('radio-ch').value.trim();
+        if (!ch) return radioNote('Type a channel first.', 'bad');
+        radioAudio();
+        radio.ch = ch; radio.joined = true; radio.since = 0; radio.next = {};
+        $('radio-ch').disabled = true;
+        $('radio-join').textContent = 'Leave';
+        $('radio-talk').disabled = !canTalk;
+        radioIdle();
+        radioPoll();
+    }
+
+    function radioLeave() {
+        radioTalk(false);
+        radio.joined = false;
+        clearTimeout(radio.timer);
+        clearTimeout(radio.noteTimer);
+        if (radio.abort) radio.abort.abort();
+        fetch(`${base}voice/leave?id=${radio.id}`, { headers: { 'X-Livemap-Key': key }, keepalive: true }).catch(() => {});
+        radioCloseMic();
+        $('radio-ch').disabled = false;
+        $('radio-join').textContent = 'Join';
+        $('radio-talk').disabled = true;
+        radioNote('');
+    }
+
+    if (cfg.voice && !calibrating) {
+        $('radio').hidden = false;
+        $('radio-join').onclick = () => (radio.joined ? radioLeave() : radioJoin());
+        try { $('radio-vol').value = localStorage.getItem('livemap-radio-volume') || 50; } catch (e) { /* default volume */ }
+        $('radio-vol').addEventListener('input', () => {
+            if (radio.master) radio.master.gain.value = radioVolume();
+            try { localStorage.setItem('livemap-radio-volume', $('radio-vol').value); } catch (e) { /* not remembered */ }
+        });
+        $('radio-ch').addEventListener('keydown', (e) => { if (e.key === 'Enter') radioJoin(); });
+
+        const talk = $('radio-talk');
+        talk.addEventListener('pointerdown', (e) => { e.preventDefault(); talk.setPointerCapture(e.pointerId); radioTalk(true); });
+        talk.addEventListener('pointerup', () => radioTalk(false));
+        talk.addEventListener('pointercancel', () => radioTalk(false));
+        talk.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // space bar works as the talk key while no text field is in use
+        const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+        window.addEventListener('keydown', (e) => {
+            if (e.code !== 'Space' || !radio.joined || typing(e)) return;
+            e.preventDefault();
+            if (!e.repeat) radioTalk(true);
+        });
+        window.addEventListener('keyup', (e) => { if (e.code === 'Space') radioTalk(false); });
+        window.addEventListener('blur', () => radioTalk(false));
+    }
+
+    // ---- boot ----
+    function start() {
+        stage.style.width = size + 'px';
+        stage.style.height = sizeH + 'px';
+        fit();
+        poll();
+    }
+
+    if (window.innerWidth > 700) $('panel').classList.remove('closed');
+
+    img.addEventListener('load', () => { size = img.naturalWidth || cal.size; sizeH = img.naturalHeight || size; start(); });
+    img.addEventListener('error', () => { img.hidden = true; $('map-missing').hidden = false; start(); });
+    img.referrerPolicy = 'no-referrer';
+    img.src = cfg.mapImage;
+})();
+</script>
+</body>
+</html>
